@@ -9,11 +9,9 @@ import scipy.ndimage as ndimage
 import copy
 
 anglenames = ['yaw','roll','pitch']
-bodycomnames = ['x','y','z']
-bodyquatnames = ['theta','x','y','z']
 angleidx = {k: i for i,k in enumerate(anglenames)}
-bodycomidx = {k: i for i,k in enumerate(bodycomnames)}
-bodyquatidx = {k: i for i,k in enumerate(bodyquatnames)}
+wingangle_rename = {'roll': 'deviation', 'yaw': 'stroke', 'pitch': 'rotation'}
+
 
 def quat2rpy(q):
   widx = 0
@@ -90,6 +88,7 @@ def plot_wing_angles(angles, linewidth=1.5, transform_model_to_data=False, dt=0.
 
     color_left = 'C0'
     color_right = 'C3'
+    color_xaxis = [.7,.7,.7]
     downstroke_alpha = 0.09
     fs_labels = 16
     fs_ticks = 12
@@ -109,6 +108,7 @@ def plot_wing_angles(angles, linewidth=1.5, transform_model_to_data=False, dt=0.
     # == Yaw.
     ax = plt.subplot(3, 1, 1)
     axs.append(ax)
+    plt.plot([x_axis[0],x_axis[-1]],[0,0],'-',color=color_xaxis)
     plt.plot(x_axis, angles[:, 3], color_right, linewidth=linewidth,label='Right')
     plt.plot(x_axis, angles[:, 0], color_left, linewidth=linewidth,label='Left')
     plt.legend()
@@ -117,11 +117,12 @@ def plot_wing_angles(angles, linewidth=1.5, transform_model_to_data=False, dt=0.
     for maximum, minimum in zip(maxima, minima):
         ax.add_patch(Rectangle((factor*dt*maximum, -100), factor*dt*(minimum-maximum), 200, color='k', alpha=downstroke_alpha))
     plt.ylim(ylim)
-    plt.ylabel('Yaw\n(deg)', fontsize=fs_labels)
+    plt.ylabel(f'{wingangle_rename["yaw"]}\n(deg)', fontsize=fs_labels)
     plt.yticks(fontsize=fs_ticks)
     # == Roll.
     ax = plt.subplot(3, 1, 2)
     axs.append(ax)
+    plt.plot([x_axis[0],x_axis[-1]],[0,0],'-',color=color_xaxis)
     plt.plot(x_axis, angles[:, 4], color_right, linewidth=linewidth,label='Right')
     plt.plot(x_axis, angles[:, 1], color_left, linewidth=linewidth,label='Left')
     ylim = plt.ylim()
@@ -129,11 +130,12 @@ def plot_wing_angles(angles, linewidth=1.5, transform_model_to_data=False, dt=0.
     for maximum, minimum in zip(maxima, minima):
         ax.add_patch(Rectangle((factor*dt*maximum, -100), factor*dt*(minimum-maximum), 200, color='k', alpha=downstroke_alpha))
     plt.ylim(ylim)
-    plt.ylabel('Roll\n(deg)', fontsize=fs_labels)
+    plt.ylabel(f'{wingangle_rename["roll"]}\n(deg)', fontsize=fs_labels)
     plt.yticks(fontsize=fs_ticks)
     # == Pitch.
     ax = plt.subplot(3, 1, 3)
     axs.append(ax)
+    plt.plot([x_axis[0],x_axis[-1]],[0,0],'-',color=color_xaxis)
     plt.plot(x_axis, angles[:, 5], color_right, linewidth=linewidth,label='Right')
     plt.plot(x_axis, angles[:, 2], color_left, linewidth=linewidth,label='Left')
     ylim = plt.ylim()
@@ -141,7 +143,7 @@ def plot_wing_angles(angles, linewidth=1.5, transform_model_to_data=False, dt=0.
     for maximum, minimum in zip(maxima, minima):
         ax.add_patch(Rectangle((factor*dt*maximum, -100), factor*dt*(minimum-maximum), 200, color='k', alpha=downstroke_alpha))
     plt.ylim(ylim)
-    plt.ylabel('Pitch\n(deg)', fontsize=fs_labels)
+    plt.ylabel(f'{wingangle_rename["pitch"]}\n(deg)', fontsize=fs_labels)
     plt.xlabel('Time (ms)', fontsize=fs_labels)
     plt.xticks(fontsize=fs_ticks)
     plt.yticks(fontsize=fs_ticks)
@@ -405,13 +407,30 @@ def filter_trajectories(data,trajidx):
   ntraj = len(data['qpos'])
   for k,v in data.items():
     if (type(v) == list) and len(v) == ntraj:
-      print(f'filterint list {k}')
+      print(f'filtering list {k}')
       data[k] = [v[i] for i in trajidx]
     elif (type(v) == np.ndarray) and v.shape[0] == ntraj:
       print(f'filtering ndarray {k}')
       data[k] = v[trajidx]
     else:
       print(f'skipping {k}')
+  return
+
+def add_wing_qpos_ref(realdata,modeldata):
+  """
+  add_wing_qpos_ref(realdata,modeldata)
+  Add wing_qpos_ref for the real data to the model data. Swap left and right wings if the trajectory is flipped.
+  Modifies modeldata in place. 
+  """
+  ntraj = len(modeldata['qpos'])
+  modeldata['wing_qpos_ref'] = []
+  
+  for i in range(ntraj):
+    reali = modeldata['traj_inds_orig'][i]
+    isflipped = reali < 0
+    if isflipped:
+      reali = -reali
+    modeldata['wing_qpos_ref'].append(realdata['wing_qpos'][reali][:,[3,4,5,0,1,2]])
   return
 
 if __name__ == "__main__":
@@ -424,6 +443,17 @@ if __name__ == "__main__":
   modeldatafile = 'analysis-rollouts-272_flight-imitation-wbpg-shaping_no-root-quat-no-height-obs_init-rot-qvel_data-hdf5_start-step-random_net-1_wing-prms-18_split-train-test_margin-0.4-pi_seed-1.pkl'
   realdata = load_data(realdatafile)
   allmodeldata = load_data(modeldatafile)
+
+  # which non-flipped example does each model trajectory come from?
+  ntraj_per_dataset = [92,44]
+  allmodeldata['traj_inds_orig'] = []
+  off = 0
+  for n in ntraj_per_dataset:
+    # list from 0 to n-1
+    allmodeldata['traj_inds_orig'] += list(range(off,off+n))
+    allmodeldata['traj_inds_orig'] += [-x for x in range(off,off+n)]
+    off += n
+  add_wing_qpos_ref(realdata,allmodeldata)
   
   modeldata = copy.deepcopy(allmodeldata)
   filter_trajectories(modeldata,testtrajidx)
@@ -434,6 +464,7 @@ if __name__ == "__main__":
   # compute roll pitch yaw
   add_rpy_to_data(modeldata)
   add_rpy_to_data(modeldata,suffix='_ref')
+  add_rpy_to_data(realdata)
   
   # compute vel and acc
   add_vel_acc_to_data(modeldata,dt)
@@ -446,49 +477,32 @@ if __name__ == "__main__":
   add_turnangles(modeldata,suffix='_ref',deltaturn=deltaturn)
   
   fig,ax = plot_rpy_response(modeldata,dt,deltaturn=deltaturn)
-  
-  # remove the repeated trajectories from the model data
-  # idxkeep = np.r_[np.arange(92),np.arange(184,228)]
-  # ntraj0 = len(modeldata['qpos'])
-  # istesttraj = np.zeros(len(modeldata['qpos']),dtype=bool)
-  # istesttraj[testtrajidx] = True
-  
-  # for k,v in modeldata.items():
-  #   if type(v) == list and len(v) == ntraj0:
-  #     print(f'filtering {k}')
-  #     modeldata[k] = [v[i] for i in idxkeep]
-  #   else:
-  #     print(f'skipping {k}')
-  # istesttraj = istesttraj[idxkeep]
-  # testtrajidx = np.nonzero(istesttraj)[0]
-  # ntraj_model = len(modeldata['qpos'])
-  # ntraj_real = len(realdata['qpos'])
-  # assert ntraj_model == ntraj_real
-  # ntraj = ntraj_model
   ntraj = len(modeldata['qpos'])
   
-  order = np.argsort(modeldata['turnangle'][testtrajidx])
-  order = testtrajidx[order]
+  order = np.argsort(modeldata['turnangle'])
   idxplot = np.r_[order[:5],order[-5:]]
 
-  # plot roll pitch yaw for first nplot trajectories
+  # plot roll pitch yaw for nplot trajectories
   fig,ax = plot_body_rpy_traj(modeldata,dt,idxplot=idxplot)
-
   
   # plot wing angles
-  traji = testtrajidx[1]
-  figreal,axreal = plot_wing_angles(realdata['wing_qpos'][traji],transform_model_to_data=True)
-  figmodel,axmodel = plot_wing_angles(modeldata['wing_qpos'][traji],transform_model_to_data=True)
-  axmodel[0].set_title('Model')
-  axreal[0].set_title('Real')
-  # link axes for the real and model plots
-  for i in range(len(axreal)):
-    ylimreal = axreal[i].get_ylim()
-    ylimmodel = axmodel[i].get_ylim()
-    ylim = (min(ylimreal[0],ylimmodel[0]),max(ylimreal[1],ylimmodel[1]))
-    axreal[i].set_ylim(ylim)
-    axmodel[i].set_ylim(ylim)
+  for traji in idxplot:
+    figreal,axreal = plot_wing_angles(modeldata['wing_qpos_ref'][traji],transform_model_to_data=True)
+    figmodel,axmodel = plot_wing_angles(modeldata['wing_qpos'][traji],transform_model_to_data=True)
+    axmodel[0].set_title('Model')
+    axreal[0].set_title('Real')
+    # link axes for the real and model plots
+    for i in range(len(axreal)):
+      ylimreal = axreal[i].get_ylim()
+      ylimmodel = axmodel[i].get_ylim()
+      ylim = (min(ylimreal[0],ylimmodel[0]),max(ylimreal[1],ylimmodel[1]))
+      axreal[i].set_ylim(ylim)
+      axmodel[i].set_ylim(ylim)
+    figreal.savefig(f'real_wingangles_traj{traji}.png')
+    figmodel.savefig(f'model_wingangles_traj{traji}.png')
+    figreal.savefig(f'real_wingangles_traj{traji}.svg')
+    figmodel.savefig(f'model_wingangles_traj{traji}.svg')
+    plt.close(figreal)
+    plt.close(figmodel)
 
-
-  
   print('Goodbye!')
