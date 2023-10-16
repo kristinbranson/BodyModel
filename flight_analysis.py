@@ -456,6 +456,12 @@ def add_wing_qpos_ref(realdata,modeldata):
   return
 
 def compare_rpy_matlab(realdata,rpydatafile,dt):
+  """
+  compare_rpy_matlab(realdata,rpydatafile,dt)
+  Compare roll pitch yaw computed by matlab to that computed by python.
+  Plots roll pitch and yaw computed in three ways for the first 10 trajectories.
+  """
+  
   matdata,_ = loadmat(rpydatafile)
   rpy_loaded = np.array(matdata['rpy_loaded'])
   rpy_loaded = np.transpose(rpy_loaded,(2,1,0))
@@ -464,20 +470,25 @@ def compare_rpy_matlab(realdata,rpydatafile,dt):
   dts_mat = np.array(matdata['dts'])
   dts_mat = dts_mat[:,0]
   
-  k = 0
-  fig,ax = plt.subplots(3,1,sharex=True)
+  nplot = 10
+  fig,ax = plt.subplots(3,10,sharex='col',sharey=True,figsize=(30,15))
+  keys = ['roll','pitch','yaw']
+  for traji in range(nplot):
+    for i in range(3):
+      key = keys[i]
+      js = np.nonzero(np.isnan(rpy_loaded[:,traji,i])==False)[0]
+      j0 = js[0]
+      j1 = js[-1]
+      dts_mat_curr = dts_mat[j0:j1]-dts_mat[j0]
+      dts_py_curr = np.arange(len(realdata[key][traji]))*dt
+      ax[i,traji].plot(dts_mat_curr,rpy_loaded[j0:j1,traji,i],label='loaded')
+      ax[i,traji].plot(dts_mat_curr,rpy_matcomputed[j0:j1,traji,i],label='matlab computed')
+      ax[i,traji].plot(dts_py_curr,realdata[key][traji],'--',label='python computed')
+  ax[0,0].legend()
   for i in range(3):
-    js = np.nonzero(np.isnan(rpy_loaded[:,k,i])==False)[0]
-    j0 = js[0]
-    j1 = js[-1]
-    dts_mat_curr = dts_mat[j0:j1]-dts_mat[j0]
-    dts_py_curr = np.arange(len(realdata['roll'][k]))*dt
-    ax[i].plot(dts_mat_curr,rpy_loaded[j0:j1,k,i],label='loaded')
-    ax[i].plot(dts_mat_curr,rpy_matcomputed[j0:j1,k,i],label='matlab computed')
-    ax[i].plot(dts_py_curr,realdata['roll'][k][j0:j1],label='python computed')
-    
-  
-  
+    ax[i,0].set_ylabel(keys[i])
+  ax[-1,0].set_xlabel('Time (s)')
+  fig.tight_layout()  
 
 if __name__ == "__main__":
   print('Hello!')
