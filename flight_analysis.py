@@ -11,8 +11,9 @@ import scipy.ndimage as ndimage
 import copy
 
 anglenames = ['yaw','roll','pitch']
-angleidx = {k: i for i,k in enumerate(anglenames)}
 wingangle_rename = {'roll': 'deviation', 'yaw': 'stroke', 'pitch': 'rotation'}
+angleidx = {wingangle_rename[k]: i for i,k in enumerate(anglenames)}
+WINGISTRANSFORMED = False
 
 def loadmat(matfile):
   """
@@ -70,18 +71,20 @@ def quatseq2rpy(q):
 
 def transform_wing_angles(angles,body_pitch_angle=47.5):
 
+  assert (WINGISTRANSFORMED==False)
   body_pitch_angle = np.deg2rad(body_pitch_angle)
   # Yaw: doesn't require transformation.
   # Roll.
   for i in range(angles.shape[-1]//3):
     off = i*3
-    # yaw doesn't require transformation
     
-    # roll
-    angles[:, off+angleidx['roll']] = - angles[:, off+angleidx['roll']]
+    # stroke doesn't require transformation
+    
+    # deviation
+    angles[:, off+angleidx['deviation']] = - angles[:, off+angleidx['deviation']]
 
-    # pitch
-    angles[:, off+angleidx['pitch']] = np.pi/2 - body_pitch_angle - angles[:, off+angleidx['pitch']]
+    # rotation
+    angles[:, off+angleidx['rotation']] = np.pi/2 - body_pitch_angle - angles[:, off+angleidx['rotation']]
 
   return angles
 
@@ -142,7 +145,7 @@ def plot_wing_angles(angles, linewidth=1.5, transform_model_to_data=False, dt=0.
     plt.ylabel(f'{wingangle_rename["yaw"]}\n(deg)', fontsize=fs_labels)
     plt.yticks(fontsize=fs_ticks)
     # == Roll.
-    ax = plt.subplot(3, 1, 2)
+    ax = plt.subplot(3, 1, 2,sharex=ax)
     axs.append(ax)
     plt.plot([x_axis[0],x_axis[-1]],[0,0],'-',color=color_xaxis)
     plt.plot(x_axis, angles[:, 4], color_right, linewidth=linewidth,label='Right')
@@ -155,7 +158,7 @@ def plot_wing_angles(angles, linewidth=1.5, transform_model_to_data=False, dt=0.
     plt.ylabel(f'{wingangle_rename["roll"]}\n(deg)', fontsize=fs_labels)
     plt.yticks(fontsize=fs_ticks)
     # == Pitch.
-    ax = plt.subplot(3, 1, 3)
+    ax = plt.subplot(3, 1, 3,sharex=ax)
     axs.append(ax)
     plt.plot([x_axis[0],x_axis[-1]],[0,0],'-',color=color_xaxis)
     plt.plot(x_axis, angles[:, 5], color_right, linewidth=linewidth,label='Right')
@@ -171,6 +174,83 @@ def plot_wing_angles(angles, linewidth=1.5, transform_model_to_data=False, dt=0.
     plt.yticks(fontsize=fs_ticks)
     
     return fig,np.array(axs)
+
+def compute_attackangle_stats(attackangles,strokets,nsample=181):
+  
+  samplephases = np.linspace(0,1,nsample)
+  ntraj = len(attackangles)
+  nstrokes = np.sum([x.shape[0] for x in strokets])
+  attackangles_per_stroke = np.zeros((nstrokes,nsample))
+  off = 0
+  for traji in range(ntraj):
+    for strokei in range(strokets[traji].shape[0]):
+      t0 = strokets[traji][strokei,0]
+      t1 = strokets[traji][strokei,1]
+      attackcurr = attackangles[traji][t0:t1+1]
+      phasescurr = np.linspace(0,1,t1-t0+1)
+      attackcurr_phase = np.interp(samplephases,phasescurr,attackcurr)
+      attackangles_per_stroke[off,:] = attackcurr_phase
+      off += 1
+  meanattackangle = np.nanmean(attackangles_per_stroke,axis=0)
+  stdattackangle = np.nanstd(attackangles_per_stroke,axis=0)
+  return meanattackangle,stdattackangle,attackangles_per_stroke
+    
+def plot_attackangle_by_stroketype(modeldata,plotall=False):
+  """
+  plot_attackangle_by_stroketype(modeldata,plotall=False)
+  Plot attack angle for left and right wings for downstroke and upstroke.
+  If plotall==True, all strokes are plotted. Otherwise, standard deviation is plotted.
+  Returns:
+  fig, ax
+  """
+  sideoff = {'left': 0, 'right': 3}
+  stroketypes = ['down','up']
+  datatype_suffixes = {'real': '_ref', 'model': ''}
+  meanattackangle = {}
+  stdattackangle = {}
+  attackangles_per_stroke = {}
+
+  for datatype,suffix in datatype_suffixes.items():
+    for side,off in sideoff.items():
+      attackangles = [x[:,off+angleidx['rotation']] for x in modeldata['wing_qpos'+suffix]]
+      for stroketype in stroketypes:
+        fn = f'{datatype}_{side}_{stroketype}'
+        meanattackangle[fn],stdattackangle[fn],attackangles_per_stroke[fn] = \
+          compute_attackangle_stats(attackangles,modeldata[stroketype+'strokes'+suffix])
+
+  cmcurr = matplotlib.colormaps.get_cmap('tab10')
+  colors = {}
+  for i,datatype in enumerate(datatype_suffixes.keys()):
+    colors[datatype] = np.array(cmcurr(i))
+
+  nsample = list(meanattackangle.values())[0].shape[0]
+  phase = np.linspace(0,np.pi,nsample)
+  ylim = [-np.pi/2,np.pi/2]
+  
+  fig,ax = plt.subplots(2,2,sharex=True,sharey=True)
+  for i,side in enumerate(sideoff.keys()):
+    for j,stroketype in enumerate(stroketypes):
+      for k,datatype in enumerate(datatype_suffixes.keys()):
+        fn = f'{datatype}_{side}_{stroketype}'
+        if plotall:
+          ax[j,i].plot(phase,attackangles_per_stroke[fn].T,color=colors[datatype][:3]*.5+.5,lw=.25,alpha=.25)
+        else:
+          ax[j,i].fill_between(phase,meanattackangle[fn]-stdattackangle[fn],
+                              meanattackangle[fn]+stdattackangle[fn],color=colors[datatype][:3],alpha=.5,
+                              linestyle='None')
+      for k,datatype in enumerate(datatype_suffixes.keys()):
+        fn = f'{datatype}_{side}_{stroketype}'
+        ax[j,i].plot(phase,meanattackangle[fn],color=colors[datatype],lw=2,label=datatype)
+      ax[j,i].set_title(f'{stroketype}stroke, {side} wing')
+      ax[j,i].set_ylim(ylim)
+  ax[-1,0].set_ylabel('Wing rotation angle')
+  ax[-1,0].set_xlabel('Phase')
+  # legend with location bottom right
+  ax[0,0].legend(loc='lower right')
+  fig.tight_layout()
+
+  return fig,ax
+  
 
 def local_maxima_indices(x, consistency=1, proximity_threshold=None):
     """Returns indices of local maxima in x."""
@@ -452,7 +532,8 @@ def add_wing_qpos_ref(realdata,modeldata):
     isflipped = reali < 0
     if isflipped:
       reali = -reali
-    modeldata['wing_qpos_ref'].append(realdata['wing_qpos'][reali][:,[3,4,5,0,1,2]])
+    wing_qpos = realdata['wing_qpos'][reali].copy()
+    modeldata['wing_qpos_ref'].append(wing_qpos[:,[3,4,5,0,1,2]])
   return
 
 def compare_rpy_matlab(realdata,rpydatafile,dt):
@@ -489,6 +570,53 @@ def compare_rpy_matlab(realdata,rpydatafile,dt):
     ax[i,0].set_ylabel(keys[i])
   ax[-1,0].set_xlabel('Time (s)')
   fig.tight_layout()  
+  
+def plot_wing_angle_trajs(modeldata,idxplot,dosave=False):
+  for traji in idxplot:
+    figreal,axreal = plot_wing_angles(modeldata['wing_qpos_ref'][traji],transform_model_to_data=False)
+    figmodel,axmodel = plot_wing_angles(modeldata['wing_qpos'][traji],transform_model_to_data=False)
+    axmodel[0].set_title('Model')
+    axreal[0].set_title('Real')
+    # link axes for the real and model plots
+    for i in range(len(axreal)):
+      ylimreal = axreal[i].get_ylim()
+      ylimmodel = axmodel[i].get_ylim()
+      ylim = (min(ylimreal[0],ylimmodel[0]),max(ylimreal[1],ylimmodel[1]))
+      axreal[i].set_ylim(ylim)
+      axmodel[i].set_ylim(ylim)
+    if dosave:
+      figreal.savefig(f'real_wingangles_traj{traji}.png')
+      figmodel.savefig(f'model_wingangles_traj{traji}.png')
+      figreal.savefig(f'real_wingangles_traj{traji}.svg')
+      figmodel.savefig(f'model_wingangles_traj{traji}.svg')
+      plt.close(figreal)
+      plt.close(figmodel)
+      
+def add_wingstroke_timing(data,suffix=''):
+  
+  body_pitch_angle = 47.5
+  data['downstrokes'+suffix] = []
+  data['upstrokes'+suffix] = []
+  ntraj = len(data['wing_qpos'+suffix])
+  for traji in range(ntraj):
+    angles = modeldata['wing_qpos'+suffix][traji]
+    # downstrokes go from maxima to minima
+    # upstrokes go from minima to maxima
+    maxima,minima = get_downstroke(angles)
+    if maxima[0] < minima[0]:
+      ndownstrokes = np.minimum(len(minima),len(maxima))
+      downstrokes = np.c_[maxima[:ndownstrokes],minima[:ndownstrokes]]
+      nupstrokes = np.minimum(len(minima)-1,len(maxima))
+      upstrokes = np.c_[minima[:nupstrokes],maxima[1:nupstrokes+1]]
+    else:
+      ndownstrokes = np.minimum(len(minima)-1,len(maxima))
+      downstrokes = np.c_[maxima[:ndownstrokes],minima[1:ndownstrokes+1]]
+      nupstrokes = np.minimum(len(minima),len(maxima))
+      upstrokes = np.c_[minima[:nupstrokes],maxima[:nupstrokes]]
+    data['downstrokes'+suffix].append(downstrokes)
+    data['upstrokes'+suffix].append(upstrokes)
+  
+  return
 
 if __name__ == "__main__":
   print('Hello!')
@@ -513,6 +641,15 @@ if __name__ == "__main__":
     off += n
   add_wing_qpos_ref(realdata,allmodeldata)
   
+  # transform wing angle -- don't do this more than once!!
+  assert WINGISTRANSFORMED == False
+  for i in range(len(allmodeldata['wing_qpos'])):
+    allmodeldata['wing_qpos_ref'][i] = transform_wing_angles(allmodeldata['wing_qpos_ref'][i])
+    allmodeldata['wing_qpos'][i] = transform_wing_angles(allmodeldata['wing_qpos'][i])
+  for i in range(len(realdata['wing_qpos'])):
+    realdata['wing_qpos'][i] = transform_wing_angles(realdata['wing_qpos'][i])
+  WINGISTRANSFORMED = True
+  
   modeldata = copy.deepcopy(allmodeldata)
   filter_trajectories(modeldata,testtrajidx)
     
@@ -523,7 +660,9 @@ if __name__ == "__main__":
   add_rpy_to_data(modeldata)
   add_rpy_to_data(modeldata,suffix='_ref')
   add_rpy_to_data(realdata)
-    
+  
+  compare_rpy_matlab(realdata,rpydatafile,dt)  
+  
   # compute vel and acc
   add_vel_acc_to_data(modeldata,dt)
   add_vel_acc_to_data(modeldata,dt,suffix='_ref')
@@ -542,25 +681,13 @@ if __name__ == "__main__":
 
   # plot roll pitch yaw for nplot trajectories
   fig,ax = plot_body_rpy_traj(modeldata,dt,idxplot=idxplot)
-  
+    
   # plot wing angles
-  for traji in idxplot:
-    figreal,axreal = plot_wing_angles(modeldata['wing_qpos_ref'][traji],transform_model_to_data=True)
-    figmodel,axmodel = plot_wing_angles(modeldata['wing_qpos'][traji],transform_model_to_data=True)
-    axmodel[0].set_title('Model')
-    axreal[0].set_title('Real')
-    # link axes for the real and model plots
-    for i in range(len(axreal)):
-      ylimreal = axreal[i].get_ylim()
-      ylimmodel = axmodel[i].get_ylim()
-      ylim = (min(ylimreal[0],ylimmodel[0]),max(ylimreal[1],ylimmodel[1]))
-      axreal[i].set_ylim(ylim)
-      axmodel[i].set_ylim(ylim)
-    figreal.savefig(f'real_wingangles_traj{traji}.png')
-    figmodel.savefig(f'model_wingangles_traj{traji}.png')
-    figreal.savefig(f'real_wingangles_traj{traji}.svg')
-    figmodel.savefig(f'model_wingangles_traj{traji}.svg')
-    plt.close(figreal)
-    plt.close(figmodel)
+  #plot_wing_angle_trajs(modeldata,idxplot,dosave=True)
+  plot_wing_angle_trajs(modeldata,idxplot[[0,]])
+  
+  add_wingstroke_timing(modeldata,suffix='_ref')
+  add_wingstroke_timing(modeldata)
 
+  fig,ax = plot_attackangle_by_stroketype(modeldata,plotall=True)
   print('Goodbye!')
