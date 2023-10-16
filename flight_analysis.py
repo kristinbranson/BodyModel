@@ -5,12 +5,34 @@ import matplotlib.pyplot as plt
 from matplotlib import cm,animation,colors
 from matplotlib.patches import Rectangle
 import pickle
+import h5py
+import scipy
 import scipy.ndimage as ndimage
 import copy
 
 anglenames = ['yaw','roll','pitch']
 angleidx = {k: i for i,k in enumerate(anglenames)}
 wingangle_rename = {'roll': 'deviation', 'yaw': 'stroke', 'pitch': 'rotation'}
+
+def loadmat(matfile):
+  """
+  Load mat file using scipy.io.loadmat or h5py.File.
+  Input: 
+    matfile: path to mat file
+  Output:
+    f: loaded mat file object
+    datatype: 'scipy' or 'h5py'
+  """
+  assert os.path.exists(matfile)
+  try:
+    f = scipy.io.loadmat(matfile, struct_as_record=False)
+    datatype = 'scipy'
+  except NotImplementedError:
+    f = h5py.File(matfile, 'r')
+    datatype = 'h5py'    
+  except:
+    ValueError(f'could not read mat file {matfile}')
+  return f, datatype
 
 
 def quat2rpy(q):
@@ -433,6 +455,30 @@ def add_wing_qpos_ref(realdata,modeldata):
     modeldata['wing_qpos_ref'].append(realdata['wing_qpos'][reali][:,[3,4,5,0,1,2]])
   return
 
+def compare_rpy_matlab(realdata,rpydatafile,dt):
+  matdata,_ = loadmat(rpydatafile)
+  rpy_loaded = np.array(matdata['rpy_loaded'])
+  rpy_loaded = np.transpose(rpy_loaded,(2,1,0))
+  rpy_matcomputed = np.array(matdata['rpy_computed'])
+  rpy_matcomputed = np.transpose(rpy_matcomputed,(2,1,0))
+  dts_mat = np.array(matdata['dts'])
+  dts_mat = dts_mat[:,0]
+  
+  k = 0
+  fig,ax = plt.subplots(3,1,sharex=True)
+  for i in range(3):
+    js = np.nonzero(np.isnan(rpy_loaded[:,k,i])==False)[0]
+    j0 = js[0]
+    j1 = js[-1]
+    dts_mat_curr = dts_mat[j0:j1]-dts_mat[j0]
+    dts_py_curr = np.arange(len(realdata['roll'][k]))*dt
+    ax[i].plot(dts_mat_curr,rpy_loaded[j0:j1,k,i],label='loaded')
+    ax[i].plot(dts_mat_curr,rpy_matcomputed[j0:j1,k,i],label='matlab computed')
+    ax[i].plot(dts_py_curr,realdata['roll'][k][j0:j1],label='python computed')
+    
+  
+  
+
 if __name__ == "__main__":
   print('Hello!')
 
@@ -441,6 +487,7 @@ if __name__ == "__main__":
   testtrajidx = np.array([  5,   6,   8,  13,  14,  19,  22,  23,  24,  32,  43,  57,  59, 68,  75,  79,  85,  87,  90, 101, 103, 114, 117, 118, 120, 131, 132, 134, 137, 138, 148, 150, 153, 157, 173, 183, 185, 190, 194, 204, 205, 211, 213, 214, 216, 223, 226, 233, 241, 246, 258, 266, 268, 270, 271])
   realdatafile = 'flight-dataset_wing-qpos_not-augmented_evasion-saccade_n-traj-136.pkl'
   modeldatafile = 'analysis-rollouts-272_flight-imitation-wbpg-shaping_no-root-quat-no-height-obs_init-rot-qvel_data-hdf5_start-step-random_net-1_wing-prms-18_split-train-test_margin-0.4-pi_seed-1.pkl'
+  rpydatafile = 'rpy.mat'
   realdata = load_data(realdatafile)
   allmodeldata = load_data(modeldatafile)
 
@@ -465,7 +512,7 @@ if __name__ == "__main__":
   add_rpy_to_data(modeldata)
   add_rpy_to_data(modeldata,suffix='_ref')
   add_rpy_to_data(realdata)
-  
+    
   # compute vel and acc
   add_vel_acc_to_data(modeldata,dt)
   add_vel_acc_to_data(modeldata,dt,suffix='_ref')

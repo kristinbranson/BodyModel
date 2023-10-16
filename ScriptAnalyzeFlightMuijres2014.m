@@ -3,13 +3,14 @@ addpath ~/behavioranalysis/code/Jdetect/Jdetect/misc;
 
 %% compute roll pitch yaw from quaternion body position
 
-figure(6);
-clf;
-hax = createsubplots(3,10);
-hax = reshape(hax,[3,10]);
+ntraj = size(body_data.pos,2);
+T = size(body_data.pos,1);
+dt = 1/settings_variables.fps;
 
-
-for k = 1:10,
+rpy_loaded = nan([T,ntraj,3]);
+rpy_computed = nan([T,ntraj,3]);
+dts = (0:T-1)*dt;
+for k = 1:ntraj,
   q = squeeze(body_data.qbody(:,k,:));
   q = q(:,[4,1,2,3]);
 
@@ -31,17 +32,39 @@ for k = 1:10,
 %   dpitch = asin(2.0 .* (dq(:,2) .* dq(:,4) - dq(:,3) .* dq(:,1)));
 %   dyaw   = atan2(2.0 .* (dq(:,3) .* dq(:,4) + dq(:,1) .* dq(:,2)) , - 1.0 + 2.0 .* (dq(:,4) .* dq(:,4) + dq(:,1) .* dq(:,1)));
   omegacurr = [droll,dpitch,dyaw];
-  for i = 1:3,
-    plot(hax(i,k), cumsum([0;omegacurr(:,i)]),'.-');
-  end
+  rpy_curr = cumsum([zeros(1,3);omegacurr]);
+  rpy_computed(j0:j1,k,:) = rpy_curr;
 
   omegacurr = squeeze(body_data.omega(:,k,:))*dt;
-  omegacurr = omegacurr(j0:j1,:);
+  omegacurr = omegacurr(j0:j1-1,:);
+  rpy_curr = cumsum([zeros(1,3);omegacurr]);
+  rpy_loaded(j0:j1,k,:) = rpy_curr;
+
+end
+
+figure(6);
+clf;
+hax = createsubplots(3,10);
+hax = reshape(hax,[3,10]);
+
+for k = 1:10,
+  rpy_curr = squeeze(rpy_computed(:,k,:));
+  js = find(~isnan(rpy_curr(:,1)));
+  j0 = js(1);
+  j1 = js(end);
+  rpy_curr = rpy_curr(j0:j1,:);
+  for i = 1:3,
+    plot(hax(i,k), rpy_curr(:,i),'.-');
+  end
+
+  rpy_curr = squeeze(rpy_loaded(j0:j1,k,:));
   for i = 1:3,
     hold(hax(i,k),'on');
-    plot(hax(i,k), cumsum([0;omegacurr(:,i)]),'.-');
+    plot(hax(i,k), rpy_curr(:,i),'.-');
   end
 end
+
+save rpy.mat rpy_computed rpy_loaded dts
 
 %% compute CoM accelerations
 
@@ -49,7 +72,6 @@ g = 9.80665; % m / (s^2)
 t0 = settings_variables.trigger_frame;
 acc_thresh_g = 0.28;
 
-ntraj = size(body_data.pos,2);
 startts = nan(ntraj,1);
 responsets = nan(ntraj,1);
 stimstart = (t0-1)*dt;
