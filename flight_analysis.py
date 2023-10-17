@@ -9,6 +9,7 @@ import h5py
 import scipy
 import scipy.ndimage as ndimage
 import copy
+import quaternion
 
 anglenames = ['yaw','roll','pitch']
 wingangle_rename = {'roll': 'deviation', 'yaw': 'stroke', 'pitch': 'rotation'}
@@ -35,28 +36,39 @@ def loadmat(matfile):
     ValueError(f'could not read mat file {matfile}')
   return f, datatype
 
-
 def quat2rpy(q):
   widx = 0
   xidx = 1
   yidx = 2
   zidx = 3
-  roll  = np.arctan2(2.0 * (q[:,zidx] * q[:,yidx] + q[:,widx] * q[:,xidx]) , 1.0 - 2.0 * (q[:,xidx] * q[:,xidx] + q[:,yidx] * q[:,yidx]))
-  pitch = np.arcsin(2.0 * (q[:,yidx] * q[:,widx] - q[:,zidx] * q[:,xidx]))
-  yaw   = np.arctan2(2.0 * (q[:,zidx] * q[:,widx] + q[:,xidx] * q[:,yidx]) , - 1.0 + 2.0 * (q[:,widx] * q[:,widx] + q[:,xidx] * q[:,xidx]))
+  roll  = np.arctan2(2.0 * (q[...,zidx] * q[...,yidx] + q[...,widx] * q[...,xidx]) , 1.0 - 2.0 * (q[...,xidx] * q[...,xidx] + q[...,yidx] * q[...,yidx]))
+  pitch = np.arcsin(np.clip(2.0 * (q[...,yidx] * q[...,widx] - q[...,zidx] * q[...,xidx]),-1.,1.))
+  yaw   = np.arctan2(2.0 * (q[...,zidx] * q[...,widx] + q[...,xidx] * q[...,yidx]) , - 1.0 + 2.0 * (q[...,widx] * q[...,widx] + q[...,xidx] * q[...,xidx]))
   return {'roll': roll, 'pitch': pitch, 'yaw': yaw}
 
+def rpy2quat(roll: np.ndarray, pitch: np.ndarray, yaw: np.ndarray):
+    """Convert rpy to quaternion."""
+    if type(roll) is not np.ndarray:
+      roll = np.array([roll])
+      pitch = np.array([pitch])
+      yaw = np.array([yaw])
+    sz = roll.shape
+    q_roll = np.c_[np.cos(roll/2), np.sin(roll/2), np.zeros(sz), np.zeros(sz)]
+    q_yaw = np.c_[np.cos(yaw/2), np.zeros(sz), np.zeros(sz), np.sin(yaw/2)]
+    q_pitch = np.c_[np.cos(pitch/2), np.zeros(sz), np.sin(pitch/2), np.zeros(sz)]
+    return quatmultiply(quatmultiply(q_yaw, q_pitch), q_roll)
+
 def quatconj(q):
-  return np.c_[q[:,0],-q[:,1],-q[:,2],-q[:,3]]
+  return np.concatenate((q[...,[0,]],-q[...,[1,]],-q[...,[2,]],-q[...,[3,]]),axis=-1)
 
 def quatmultiply(q,r):
-  n0 = r[:,0]*q[:,0] - r[:,1]*q[:,1] - r[:,2]*q[:,2] - r[:,3]*q[:,3]
-  n1 = r[:,0]*q[:,1] + r[:,1]*q[:,0] - r[:,2]*q[:,3] + r[:,3]*q[:,2]
-  n2 = r[:,0]*q[:,2] + r[:,1]*q[:,3] + r[:,2]*q[:,0] - r[:,3]*q[:,1]
-  n3 = r[:,0]*q[:,3] - r[:,1]*q[:,2] + r[:,2]*q[:,1] + r[:,3]*q[:,0]
-  n = np.c_[n0,n1,n2,n3]
-  z = np.linalg.norm(n,axis=1)
-  n = n / z[:,None]
+  n0 = r[...,0]*q[...,0] - r[...,1]*q[...,1] - r[...,2]*q[...,2] - r[...,3]*q[...,3]
+  n1 = r[...,0]*q[...,1] + r[...,1]*q[...,0] - r[...,2]*q[...,3] + r[...,3]*q[...,2]
+  n2 = r[...,0]*q[...,2] + r[...,1]*q[...,3] + r[...,2]*q[...,0] - r[...,3]*q[...,1]
+  n3 = r[...,0]*q[...,3] - r[...,1]*q[...,2] + r[...,2]*q[...,1] + r[...,3]*q[...,0]
+  n = np.concatenate((n0[...,None],n1[...,None],n2[...,None],n3[...,None]),axis=-1)
+  z = np.linalg.norm(n,axis=-1)
+  n = n / z[...,None]
   return n
 
 def quatseq2rpy(q):
@@ -68,6 +80,164 @@ def quatseq2rpy(q):
   for k,v in drpy.items():
     rpy[k] = np.cumsum(np.r_[z,v],axis=0)
   return rpy
+
+def mod2pi(x):
+  return np.mod(x+np.pi,2*np.pi)-np.pi
+
+def unwrap_angleseq(x,t0=0):
+  assert (x.ndim==1)
+  
+  if t0 != 0:
+    xpre = unwrap_angleseq(x[t0::-1])
+    xpost = unwrap_angleseq(x[t0:])
+    x = np.r_[xpre[::-1],xpost[1:]]
+    return x
+
+  # unwrap each non-nan sequence
+  isnanx = np.r_[True,np.isnan(x),True]
+  seqstarts = np.nonzero(isnanx[:-1] & (isnanx[1:] == False))[0]
+  seqends = np.nonzero(isnanx[1:] & (isnanx[:-1] == False))[0]
+
+  xout = np.zeros_like(x)
+  xout[:] = np.nan
+  for i in range(len(seqstarts)):
+    xcurr = x[seqstarts[i]:seqends[i]]
+    dx = mod2pi(xcurr[1:]-xcurr[:-1])
+    xcurr = np.cumsum(np.r_[xcurr[0],dx])
+    xout[seqstarts[i]:seqends[i]] = xcurr
+  return xout
+  
+# def test_quatseq2rpy(qseq):
+#   # qseq = modeldata['qpos'][traji][:,3:]
+#   qseq = quatmultiply(quatconj(qseq[[0,]]),qseq)
+#   rpy_seq = quatseq2rpy(qseq)
+#   rpy_direct = quat2rpy(qseq)
+#   fig,ax = plt.subplots(3,1,sharex=True)
+#   for i,key in enumerate(rpy_seq.keys()):
+#     ax[i].plot(rpy_seq[key],label='seq')
+#     ax[i].plot(rpy_direct[key],label='direct')
+#     ax[i].set_ylabel(key)
+#   ax[0].legend()
+#   qrecon_seq = rpy2quat(rpy_seq['roll'],rpy_seq['pitch'],rpy_seq['yaw'])
+#   qrecon_direct = rpy2quat(rpy_direct['roll'],rpy_direct['pitch'],rpy_direct['yaw'])
+#   err_seq = np.linalg.norm(qrecon_seq-qseq,axis=1)
+#   err_direct = np.linalg.norm(qrecon_direct-qseq,axis=1)
+#   fig = plt.figure()
+#   plt.plot(err_seq,label='seq')
+#   plt.plot(err_direct,label='direct')
+#   plt.legend()
+  
+#   err = []
+#   t0 = -1
+#   for t in range(1000):
+#     rpy0 = {k: v[[t0,]] for k,v in rpy_direct.items()}
+#     rpy1 = {k: v[[t,]] for k,v in rpy_direct.items()}
+#     qrecon0 = rpy2quat(rpy0['roll'],rpy0['pitch'],rpy0['yaw'])
+#     qrecon1 = rpy2quat(rpy1['roll'],rpy1['pitch'],rpy1['yaw'])
+#     dqrecon = quatmultiply(quatconj(qrecon0),qrecon1)
+#     drpy_recon = quat2rpy(dqrecon)
+#     drpy_direct = {k: rpy1[k]-rpy0[k] for k in rpy0.keys()}
+#     err.append(np.linalg.norm(np.array(list(drpy_recon.values()))-np.array(list(drpy_direct.values()))))
+#   plt.figure()
+#   plt.plot(np.array(err))
+#   # print(f'direct: {drpy_direct}')
+#   # print(f'recon: {drpy_recon}')
+
+#   rpy0init = {'roll': np.pi/6, 'pitch': np.pi/2+1e-16, 'yaw': -np.pi/8}
+#   q0 = rpy2quat(rpy0init['roll'],rpy0init['pitch'],rpy0init['yaw'])
+#   #q0 = qseq[1000]
+#   rpy0 = quat2rpy(q0)
+#   rpyaddpi = {'roll': mod2pi(rpy0['roll']+np.pi), 'pitch': mod2pi(np.pi-rpy0['pitch']), 'yaw': mod2pi(rpy0['yaw']+np.pi)}                          
+#   q0recon = rpy2quat(rpy0['roll'],rpy0['pitch'],rpy0['yaw'])
+#   q0addpi = rpy2quat(rpyaddpi['roll'],rpyaddpi['pitch'],rpyaddpi['yaw'])
+#   errrecon = np.linalg.norm(q0recon-q0)
+#   erraddpi = np.linalg.norm(q0addpi-q0)
+#   nsample = 361
+#   samples = np.linspace(-np.pi,np.pi,nsample)
+#   allrpy = np.meshgrid(samples,samples,samples,indexing='ij')
+#   q1 = rpy2quat(allrpy[0].flatten(),allrpy[1].flatten(),allrpy[2].flatten())
+#   err = np.linalg.norm(q1-q0,axis=1)
+#   err = err.reshape(allrpy[0].shape)
+#   order = np.argsort(err.flatten())
+#   bestidx = np.unravel_index(order[:100],err.shape)
+#   bestrpys = [samples[x] for x in bestidx]
+#   fig,ax = plt.subplots(4,1,sharex=True)
+#   keys = list(rpy0.keys())
+#   for i in range(3):
+#     ax[i].cla()
+#     ax[i].plot(-1,rpy0[keys[i]],'s')
+#     ax[i].plot(bestrpys[i],'.')
+#   ax[-1].cla()
+#   ax[-1].plot(-1,errrecon,'s')
+#   ax[-1].plot(err[*bestidx],'.-')
+#   ax[-1].set_ylabel('error')
+#   fig.tight_layout()
+#   allrpy = None
+#   q1 = None
+#   err = None
+#   order = None
+
+#   nsample = 100
+#   samples = np.linspace(-1,1,nsample)
+#   allqs = np.meshgrid(samples,samples,samples,samples,indexing='ij')
+#   allqs = np.stack([x.flatten() for x in allqs],axis=-1)
+#   allqs = allqs/np.linalg.norm(allqs,axis=-1,keepdims=True)
+#   rpys = quat2rpy(allqs)
+#   rpyaddpi = {'roll': mod2pi(rpys['roll']+np.pi), 'pitch': mod2pi(np.pi-rpys['pitch']), 'yaw': mod2pi(rpys['yaw']+np.pi)}
+#   allqsrecon = rpy2quat(rpys['roll'],rpys['pitch'],rpys['yaw'])
+#   allerrrecon = np.minimum(np.linalg.norm(allqsrecon-allqs,axis=-1),np.linalg.norm(-allqsrecon-allqs,axis=-1))
+#   q0addpi = rpy2quat(rpyaddpi['roll'],rpyaddpi['pitch'],rpyaddpi['yaw'])
+#   allerraddpi = np.minimum(np.linalg.norm(q0addpi-allqs,axis=-1),np.linalg.norm(-q0addpi-allqs,axis=-1))
+  
+#   qseq = modeldata['qpos'][traji][:,3:]
+#   qqseq = quaternion.as_quat_array(qseq)
+#   dts = np.arange(len(qqseq))*dt
+#   omega = quaternion.angular_velocity(qqseq,dts)
+#   dq = quatmultiply(quatconj(qseq[:-1]),qseq[1:])
+#   drpy = quat2rpy(dq)
+
+#   t,integral_omega = quaternion.integrate_angular_velocity((dts,omega),dts[0],dts[-1],R0=qqseq[0])
+  
+def rpy_add_pi(rpy):
+  return {'roll': mod2pi(rpy['roll']+np.pi), 'pitch': mod2pi(np.pi-rpy['pitch']), 'yaw': mod2pi(rpy['yaw']+np.pi)}
+
+def quat2rpy_prior(q,rpyprev=None,epsilon=1e-15):
+  rpy0 = quat2rpy(q)
+  if rpyprev is None:
+    rpyprev = {k: np.zeros_like(v) for k,v in rpy0.items()}
+    
+  isgimbal = np.abs(np.abs(rpy0['pitch'])-np.pi/2) < epsilon
+  rpy1 = rpy_add_pi(rpy0)
+  err0 = np.linalg.norm(np.array(list(rpy0.values()))-np.array(list(rpyprev.values())))
+  err1 = np.linalg.norm(np.array(list(rpy1.values()))-np.array(list(rpyprev.values())))
+  rpy = rpy1
+  for k in rpy.keys():
+    rpy[k][err0<err1] = rpy0[k][err0<err1]
+    
+  if np.any(isgimbal):
+    # r, y
+    # need delta to be dry
+    if type(rpyprev['roll']) is np.ndarray:
+      pass
+    elif type(rpyprev['roll']) is float:
+      rpyprev = {k: np.array([v,]) for k,v in rpyprev.items()}
+    else:
+      rpyprev = {k: np.array(v) for k,v in rpyprev.items()}
+    if type(isgimbal) is not np.ndarray:
+      isgimbal = np.array([isgimbal,])
+
+    dryprev = rpyprev['roll'][isgimbal]-rpyprev['yaw'][isgimbal]
+    dry = rpy0['roll'][isgimbal]-rpy0['yaw'][isgimbal]
+    dd = dry-dryprev
+    rpy['roll'][isgimbal] = rpyprev['roll'][isgimbal]+dd/2
+    rpy['yaw'][isgimbal] = rpyprev['yaw'][isgimbal]-dd/2
+    rpy['pitch'][isgimbal] = rpy0['pitch'][isgimbal]
+  
+  qrecon = rpy2quat(rpy['roll'],rpy['pitch'],rpy['yaw'])
+  err = np.minimum(np.linalg.norm(qrecon-q,axis=-1),np.linalg.norm(-qrecon-q,axis=-1))
+  
+  return rpy,err,isgimbal
+    
 
 def transform_wing_angles(angles,body_pitch_angle=47.5):
 
@@ -175,25 +345,25 @@ def plot_wing_angles(angles, linewidth=1.5, transform_model_to_data=False, dt=0.
     
     return fig,np.array(axs)
 
-def compute_attackangle_stats(attackangles,strokets,nsample=181):
+def compute_wingangle_stats_over_strokes(wingangles,strokets,nsample=181):
   
   samplephases = np.linspace(0,1,nsample)
-  ntraj = len(attackangles)
+  ntraj = len(wingangles)
   nstrokes = np.sum([x.shape[0] for x in strokets])
-  attackangles_per_stroke = np.zeros((nstrokes,nsample))
+  wingangles_per_stroke = np.zeros((nstrokes,nsample))
   off = 0
   for traji in range(ntraj):
     for strokei in range(strokets[traji].shape[0]):
       t0 = strokets[traji][strokei,0]
       t1 = strokets[traji][strokei,1]
-      attackcurr = attackangles[traji][t0:t1+1]
+      winganglecurr = wingangles[traji][t0:t1+1]
       phasescurr = np.linspace(0,1,t1-t0+1)
-      attackcurr_phase = np.interp(samplephases,phasescurr,attackcurr)
-      attackangles_per_stroke[off,:] = attackcurr_phase
+      winganglecurr_phase = np.interp(samplephases,phasescurr,winganglecurr)
+      wingangles_per_stroke[off,:] = winganglecurr_phase
       off += 1
-  meanattackangle = np.nanmean(attackangles_per_stroke,axis=0)
-  stdattackangle = np.nanstd(attackangles_per_stroke,axis=0)
-  return meanattackangle,stdattackangle,attackangles_per_stroke
+  meanwingangle = np.nanmean(wingangles_per_stroke,axis=0)
+  stdwingangle = np.nanstd(wingangles_per_stroke,axis=0)
+  return meanwingangle,stdwingangle,wingangles_per_stroke
     
 def plot_attackangle_by_stroketype(modeldata,plotall=False):
   """
@@ -216,7 +386,7 @@ def plot_attackangle_by_stroketype(modeldata,plotall=False):
       for stroketype in stroketypes:
         fn = f'{datatype}_{side}_{stroketype}'
         meanattackangle[fn],stdattackangle[fn],attackangles_per_stroke[fn] = \
-          compute_attackangle_stats(attackangles,modeldata[stroketype+'strokes'+suffix])
+          compute_wingangle_stats_over_strokes(attackangles,modeldata[stroketype+'strokes'+suffix])
 
   cmcurr = matplotlib.colormaps.get_cmap('tab10')
   colors = {}
@@ -297,11 +467,38 @@ def add_rpy_to_data(data,suffix=''):
   data['roll'+suffix] = []
   data['pitch'+suffix] = []
   data['yaw'+suffix] = []
-  for k in range(len(data['qpos'])):
+  for k in range(len(data['qpos'+suffix])):
     q = data['qpos'+suffix][k][:,3:]
     rpy = quatseq2rpy(q)
     for key in rpy.keys():
       data[key+suffix].append(rpy[key])
+  return
+
+
+def choose_omega_sigma(data,k=0,j=0):
+  plt.clf()
+  plt.plot(data['qpos_ref'][k][:,3+j],label='real')
+  plt.plot(data['qpos'][k][:,3+j],label='unfiltered')  
+  q0 = data['qpos'][k][:,3:]
+  for sigma in range(1,10):
+    q = q0.copy()
+    q = ndimage.gaussian_filter1d(q, sigma=sigma, axis=0, order=0, mode='nearest',cval=np.nan)
+    q = q/np.linalg.norm(q,axis=-1,keepdims=True)
+    plt.plot(q[:,j],label=f'sigma={sigma}')
+  plt.legend()
+  return
+
+def add_omega_to_data(data,dt,sigma=1,suffix=''):
+  data['omega'+suffix] = []
+  for k in range(len(data['qpos'+suffix])):
+    q = data['qpos'+suffix][k][:,3:]
+    if sigma is not None:
+      q = ndimage.gaussian_filter1d(q, sigma=sigma, axis=0, order=0, mode='nearest')
+      q = q/np.linalg.norm(q,axis=-1,keepdims=True)
+    q = quaternion.as_quat_array(q)
+    dts = np.arange(len(q))*dt
+    omega = quaternion.angular_velocity(q,dts)
+    data['omega'+suffix].append(omega)
   return
 
 def add_vel_acc_to_data(data,dt,sigma=1,suffix=''):
@@ -345,11 +542,202 @@ def plot_body_rpy_traj(modeldata,dt,nplot=10,idxplot=None):
       ax[i,j].plot(realts[responset],modeldata[key+'_ref'][traji][responset],'ko',label='response start')
       if j == 0:
         ax[i,j].set_ylabel(key)
+    ax[0,j].set_title(f'Traj {traji}, turn {modeldata["turnangle_ref"][traji]*180/np.pi:.1f}')
+  ax[0,0].legend()
+  ax[2,0].set_xlabel('Time (s)')
+  fig.tight_layout()
+  return fig,ax
+
+def plot_body_omega_traj(modeldata,dt,nplot=10,idxplot=None):
+  if idxplot is None:
+    idxplot = np.arange(nplot,dtype=int)
+  else:
+    nplot = len(idxplot)
+  fig,ax = plt.subplots(3,nplot,sharey='row',figsize=(30,15))
+  keys = ['x','y','z']
+  for j in range(nplot):
+    traji = idxplot[j]
+    realts = np.arange(len(modeldata['roll_ref'][traji]))*dt
+    modelts = np.arange(len(modeldata['roll'][traji]))*dt
+    responset = modeldata['response_time'][traji]
+    for i,key in enumerate(keys):
+      ax[i,j].plot(realts,modeldata['omega_ref'][traji][...,i],label='real')
+      ax[i,j].plot(modelts,modeldata['omega'][traji][...,i],label='model')
+      ax[i,j].plot(realts[responset],modeldata['omega_ref'][traji][responset,i],'ko',label='response start')
+      if j == 0:
+        ax[i,j].set_ylabel(f'omega {key} (rad/s)')
     ax[0,j].set_title(f'Traj {traji}, turn {modeldata["turnangle"][traji]*180/np.pi:.1f}')
   ax[0,0].legend()
   ax[2,0].set_xlabel('Time (s)')
   fig.tight_layout()
   return fig,ax
+
+def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True):
+  nbins = 4
+  minturnangle = -np.pi
+  maxturnangle = 0
+  angleturn_bin_edges = np.linspace(minturnangle,maxturnangle,nbins+1)
+  angleturn_bin_edges[-1]+=1e-6
+  binnames = []
+  for i in range(nbins):
+    angle0 = int(angleturn_bin_edges[i]*180/np.pi)
+    angle1 = int(angleturn_bin_edges[i+1]*180/np.pi)
+    if angle0 < 0:
+      angle0str = f'{-angle0}L'
+    elif angle0 > 0:
+      angle0str = f'{angle0}R'
+    else:
+      angle0str = '0'
+    if angle1 < 0:
+      angle1str = f'{-angle1}L'
+    elif angle1 > 0:
+      angle1str = f'{angle1}R'
+    else:
+      angle1str = '0'
+      
+    binnames.append(f'[{angle0str},{angle1str})')
+      
+  ntraj = len(modeldata['roll'])
+  T = deltaturn*2+1
+  omega = np.zeros((ntraj,T,3))
+  omega[:] = np.nan
+  omega_ref = np.zeros((ntraj,T,3))
+  omega_ref[:] = np.nan
+  veldir_xy = np.zeros((ntraj,T))
+  veldir_xy[:] = np.nan
+  veldir_xy_ref = np.zeros((ntraj,T))
+  veldir_xy_ref[:] = np.nan
+  
+  def alignfun(x,t0,t1,xalign):
+    assert np.any(np.isnan(xalign)==False)
+    ndim = x.ndim
+    x = np.pad(x,[(deltaturn,deltaturn),]+[(0,0),]*(ndim-1),mode='constant',constant_values=np.nan)
+    x = x[t0:t1+1]-xalign
+    return x
+  
+  for i in range(ntraj):
+    if np.abs(modeldata['omega'][i].shape[0]-modeldata['omega_ref'][i].shape[0]) > 10:
+      print(f'Warning: traj {i} has different lengths for model and real data')
+      continue
+    tresponse = modeldata['response_time'][i]
+    t = tresponse+deltaturn
+    t0 = t-deltaturn
+    t1 = t+deltaturn
+    assert (np.isnan(modeldata['veldir_xy'][i][tresponse])==False)
+    assert (np.isnan(modeldata['veldir_xy_ref'][i][tresponse])==False)
+    omega[i] = alignfun(modeldata['omega'][i],t0,t1,modeldata['omega'][i][tresponse])
+    omega_ref[i] = alignfun(modeldata['omega_ref'][i],t0,t1,modeldata['omega_ref'][i][tresponse])
+    veldir_xy[i] = alignfun(modeldata['veldir_xy'][i],t0,t1,modeldata['veldir_xy'][i][tresponse])
+    veldir_xy_ref[i] = alignfun(modeldata['veldir_xy_ref'][i],t0,t1,modeldata['veldir_xy_ref'][i][tresponse])
+
+  # flip angles so they are all left turns
+  turnangle_xy = modeldata['turnangle_xy'].copy()
+  idxpositive = turnangle_xy > 0
+  turnangle_xy[idxpositive] = -turnangle_xy[idxpositive]
+  # flip omega_x and omega_z
+  for i in [0,2]:
+    omega[idxpositive,:,i] = -omega[idxpositive,:,i]
+  veldir_xy[idxpositive] = -veldir_xy[idxpositive]
+
+  turnangle_xy_ref = modeldata['turnangle_xy_ref'].copy()  
+  idxpositive = turnangle_xy_ref > 0
+  turnangle_xy_ref[idxpositive] = -turnangle_xy_ref[idxpositive]
+  # flip omega_x and omega_z
+  for i in [0,2]:
+    omega_ref[idxpositive,:,i] = -omega_ref[idxpositive,:,i]
+  veldir_xy_ref[idxpositive] = -veldir_xy_ref[idxpositive]
+
+  meanomega = np.zeros((nbins,T,3))
+  meanomega_ref = np.zeros((nbins,T,3))
+  stderr_omega = np.zeros((nbins,T,3))
+  stderr_omega_ref = np.zeros((nbins,T,3))
+  meanveldir_xy = np.zeros((nbins,T))
+  meanveldir_xy_ref = np.zeros((nbins,T))
+  stderr_veldir_xy = np.zeros((nbins,T))
+  stderr_veldir_xy_ref = np.zeros((nbins,T))
+  assert np.all(turnangle_xy[np.isnan(turnangle_xy)==False] <= angleturn_bin_edges[-1])
+  assert np.all(turnangle_xy_ref[np.isnan(turnangle_xy_ref)==False] <= angleturn_bin_edges[-1])
+  for i in range(nbins):
+    idx = (turnangle_xy >= angleturn_bin_edges[i]) & (turnangle_xy < angleturn_bin_edges[i+1])
+    idxref = (turnangle_xy_ref >= angleturn_bin_edges[i]) & (turnangle_xy_ref < angleturn_bin_edges[i+1])
+    meanomega_ref[i] = np.nanmean(omega_ref[idxref],axis=0)
+    meanomega[i] = np.nanmean(omega[idx],axis=0)
+    # angles have been unwrapped, so 2pi offsets should be meaningful. starts at 0
+    meanveldir_xy_ref[i] = np.nanmean(veldir_xy_ref[idxref],axis=0)
+    meanveldir_xy[i] = np.nanmean(veldir_xy[idx],axis=0)
+    n = np.sum(np.any(np.isnan(omega[idx]),axis=-1)==False,axis=0)
+    nref = np.sum(np.any(np.isnan(omega_ref[idxref]),axis=-1)==False,axis=0)
+    stderr_omega_ref[i] = np.nanstd(omega_ref[idxref],axis=0)/np.sqrt(nref[...,None])
+    stderr_omega[i] = np.nanstd(omega[idx],axis=0)/np.sqrt(n[...,None])
+    n = np.sum(np.isnan(veldir_xy[idx])==False,axis=0)
+    nref = np.sum(np.isnan(veldir_xy_ref[idxref])==False,axis=0)
+    stderr_veldir_xy_ref[i] = np.nanstd(veldir_xy_ref[idxref],axis=0)/np.sqrt(nref)
+    stderr_veldir_xy[i] = np.nanstd(veldir_xy[idx],axis=0)/np.sqrt(n)
+
+  fig,ax = plt.subplots(4,2,sharex=True,sharey='row',figsize=(10,10))
+  cmcurr = matplotlib.colormaps.get_cmap('jet')
+  bincenters = (angleturn_bin_edges[:-1]+angleturn_bin_edges[1:])/2
+  meancolors = cmcurr((bincenters-minturnangle)/(maxturnangle-minturnangle))
+  ts = np.arange(-deltaturn,deltaturn+1)*dt
+  keys = ['x','y','z']
+
+  # plot shaded standard error
+  for i in range(nbins):
+    color = meancolors[i]*.5
+    for j in range(3):
+      ax[j,0].fill_between(ts,meanomega_ref[i,:,j]-stderr_omega_ref[i,:,j],
+                           meanomega_ref[i,:,j]+stderr_omega_ref[i,:,j],color=color,alpha=.5,
+                           linestyle='None')
+      ax[j,1].fill_between(ts,meanomega[i,:,j]-stderr_omega[i,:,j],
+                           meanomega[i,:,j]+stderr_omega[i,:,j],color=color,alpha=.5,
+                           linestyle='None')
+    ax[-1,0].fill_between(ts,meanveldir_xy_ref[i]-stderr_veldir_xy_ref[i],
+                          meanveldir_xy_ref[i]+stderr_veldir_xy_ref[i],color=color,alpha=.5,
+                          linestyle='None')
+    ax[-1,1].fill_between(ts,meanveldir_xy[i]-stderr_veldir_xy[i],
+                          meanveldir_xy[i]+stderr_veldir_xy[i],color=color,alpha=.5,
+                          linestyle='None')
+  if plotall:
+    for i in range(nbins):
+      idx = (turnangle_xy >= angleturn_bin_edges[i]) & (turnangle_xy < angleturn_bin_edges[i+1])
+      for k in np.nonzero(idx)[0]:
+        for j in range(3):
+          color = np.array(cmcurr((turnangle_xy[k]-minturnangle)/(maxturnangle-minturnangle))[:3])
+          color = color*.5 + .25
+          ax[j,0].plot(ts,omega_ref[k,:,j].T,color=color,lw=.25)
+          ax[j,1].plot(ts,omega[k,:,j].T,color=color,lw=.25)
+        ax[-1,0].plot(ts,veldir_xy_ref[k].T,color=color,lw=.25)
+        ax[-1,1].plot(ts,veldir_xy[k].T,color=color,lw=.25)
+  for i in range(nbins):
+    for j in range(4):
+      color = meancolors[i]*.5
+      if j < 3:
+        ax[j,0].plot(ts,meanomega_ref[i,:,j].T,color=color,lw=2,
+                    label=binnames[i])
+        ax[j,1].plot(ts,meanomega[i,:,j].T,color=color,lw=2)
+        ax[j,0].set_ylabel(f'omega {keys[j]} (rad/s)')
+      else:
+        ax[j,0].plot(ts,meanveldir_xy_ref[i].T,color=color,lw=2)
+        ax[j,1].plot(ts,meanveldir_xy[i].T,color=color,lw=2)
+        ax[j,0].set_ylabel(f'Velocity heading (rad)')
+
+      ax[j,0].grid(visible=True,axis='x')
+      ax[j,1].grid(visible=True,axis='x')
+
+  ax[0,0].set_title('Real')
+  ax[0,1].set_title('Model')
+  ax[-1,0].set_xlabel('Time (s)')
+
+  for i in range(4):
+    ylim = ax[i,0].get_ylim()
+    ylim = np.max(np.abs(np.array(ylim)))
+    ax[i,0].set_ylim((-ylim,ylim))
+
+  ax[0,0].legend()
+  fig.tight_layout()
+    
+  return fig,ax
+
 
 def plot_rpy_response(modeldata,dt,deltaturn=200):
   nbins = 4
@@ -401,7 +789,7 @@ def plot_rpy_response(modeldata,dt,deltaturn=200):
       x = x[t0:t1+1]-x[t0]
       rpy_ref[i,:,j] = x
 
-  turnangle_xy = modeldata['turnangle_xy'].copy()
+  turnangle_xy = modeldata['turnangle_xy_ref'].copy()
   idxpositive = turnangle_xy > 0
   turnangle_xy[idxpositive] = -turnangle_xy[idxpositive]
   # flip roll and yaw
@@ -483,25 +871,56 @@ def add_response_times(data,accmag_thresh,minframe_max=100,doplot=False,suffix='
       ax[i].plot([i0,i0],[0,2000])
   return
 
+def add_veldir(data,suffix='',sigma=10,epsilon=1e-3,deltaturn=200):
+  ntraj = len(data['com_vel'+suffix])
+  data['veldir'+suffix] = []
+  data['veldir_xy'+suffix] = []
+  for i in range(ntraj):
+    vel = data['com_vel'+suffix][i].copy()
+    if sigma is not None:
+      realidx = np.nonzero(np.isnan(vel)==False)[0]
+      if realidx[0] > 0:
+        vel[:realidx[0]] = vel[realidx[0]]
+      if realidx[-1] < vel.shape[0]-1:
+        vel[realidx[-1]+1:] = vel[realidx[-1]]      
+      vel = ndimage.gaussian_filter1d(vel, sigma=sigma, axis=0, order=0, mode='nearest')
+      vel[:realidx[0]-1] = np.nan
+      vel[realidx[-1]+1:] = np.nan
+      
+    z = np.linalg.norm(vel,axis=-1,keepdims=True)
+    z = np.maximum(epsilon,z)
+    veldir = vel / z
+    veldir_xy0 = np.arctan2(veldir[:,1],veldir[:,0])
+    veldir_xy = unwrap_angleseq(veldir_xy0,t0=data['response_time'][i]-deltaturn)
+    assert np.all(np.any(np.isnan(veldir),axis=-1) == np.isnan(veldir_xy))
+    assert np.nanmax(np.abs(mod2pi(veldir_xy-veldir_xy0))) < 1e-3
+    data['veldir'+suffix].append(veldir)
+    data['veldir_xy'+suffix].append(veldir_xy)
+  return  
+
 def add_turnangles(data,deltaturn=200,suffix=''):
   ntraj = len(data['com_accmag'+suffix])
-  data['turnangle'] = np.zeros(ntraj)
-  data['turnangle_xy'] = np.zeros(ntraj)
+  data['turnangle'+suffix] = np.zeros(ntraj)
+  data['turnangle_xy'+suffix] = np.zeros(ntraj)
   for i in range(ntraj):
-    vel = data['com_vel'+suffix][i]
-    T = np.nonzero(np.any(np.isnan(vel),axis=1)==False)[0][-1]
+    veldir = data['veldir'+suffix][i]
+    veldir_xy = data['veldir_xy'+suffix][i]
+    T = np.nonzero(np.all(np.isnan(veldir),axis=1)==False)[0][-1]
     t0 = data['response_time'][i]
-    t1 = np.minimum(t0+deltaturn,T)
-    vel0 = vel[t0]
-    vel1 = vel[t1]
-    veldir0 = vel0 / np.linalg.norm(vel0)
-    veldir1 = vel1 / np.linalg.norm(vel1)
-    turnangle = np.arccos(np.dot(veldir0,veldir1))
+    if t0 > T:
+      print(f'Warning: traj {i} has response time {t0} > T {T}, using reference data to get turn angle')
+      veldir = data['veldir_ref'][i]
+      veldir_xy = data['veldir_xy_ref'][i]
+      T = np.nonzero(np.any(np.isnan(veldir),axis=1)==False)[0][-1]
+    t1 = np.clip(t0+deltaturn,0,T)
+    turnangle = np.arccos(np.dot(veldir[t0],veldir[t1]))
+    # no modpi because we unwrapped veldir_xy
+    dangle_xy = veldir_xy[t1]-veldir_xy[t0]
     # choose sign based on sign of angle in x-y plane
-    dangle_xy = np.arctan2(veldir1[1],veldir1[0]) - np.arctan2(veldir0[1],veldir0[0])
     turnangle = np.sign(dangle_xy) * turnangle
-    data['turnangle'][i] = turnangle
-    data['turnangle_xy'][i] = dangle_xy
+    data['turnangle'+suffix][i] = turnangle
+    data['turnangle_xy'+suffix][i] = dangle_xy
+    assert (np.isnan(dangle_xy)==False)
     
   return
 
@@ -618,10 +1037,21 @@ def add_wingstroke_timing(data,suffix=''):
   
   return
 
+# def compute_acceleration_stats(realdata):
+#   mean_com_absacc = np.nanmean(np.abs(np.concatenate(realdata['com_acc'],axis=0)),axis=0)
+#   mean_com_absacc = np.nanmean(np.abs(np.concatenate(realdata['com_acc'],axis=0)),axis=0)
+#   realdata['com_acc']
+#   return
+
+# def plot_stroke_variability(modeldata):
+  
+#   return
+
 if __name__ == "__main__":
   print('Hello!')
 
   accmag_thresh = .28 * 9.81 * 1e2 # 0.28 g  
+  sigma_smooth = 8 # chosen by eye so that wiggles in omega for model data look like wiggles in omega for real data
   #testtrajidx = np.array([  5,   6,   8,  13,  14,  19,  22,  23,  24,  32,  43,  57,  59, 68,  75,  79,  85,  87,  90, 101, 103, 114, 117, 118, 120, 131, 132, 134, 137, 138, 148, 150, 153, 157, 173, 183, 185, 190, 194, 204, 205, 211, 213, 214, 216, 223, 226, 233, 241, 246, 258, 266, 268, 270, 271])
   testtrajidx = np.array([  5,   6,   8,  13,  14,  19,  22,  23,  24,  32,  43,  57,  59, 68,  75,  79,  85,  87,  90, 101, 103, 114, 117, 118, 120, 131, 132, 134, 137, 138, 148, 150, 153, 157, 173, 183, 185, 190, 194, 204, 205, 211, 213, 214, 216, 223, 226, 233, 241, 246, 258, 266, 268, 270, 271])
   realdatafile = 'flight-dataset_wing-qpos_not-augmented_evasion-saccade_n-traj-136.pkl'
@@ -650,37 +1080,55 @@ if __name__ == "__main__":
     realdata['wing_qpos'][i] = transform_wing_angles(realdata['wing_qpos'][i])
   WINGISTRANSFORMED = True
   
-  modeldata = copy.deepcopy(allmodeldata)
-  filter_trajectories(modeldata,testtrajidx)
-    
   dt = realdata['dt']
   deltaturn = int(40e-3/dt) # frame
 
+  # compute angular velocity
+  add_omega_to_data(allmodeldata,dt,sigma=sigma_smooth)
+  add_omega_to_data(allmodeldata,dt,suffix='_ref',sigma=None)
+  add_omega_to_data(realdata,dt,sigma=None)
+
   # compute roll pitch yaw
-  add_rpy_to_data(modeldata)
-  add_rpy_to_data(modeldata,suffix='_ref')
+  add_rpy_to_data(allmodeldata)
+  add_rpy_to_data(allmodeldata,suffix='_ref')
   add_rpy_to_data(realdata)
   
   compare_rpy_matlab(realdata,rpydatafile,dt)  
   
   # compute vel and acc
-  add_vel_acc_to_data(modeldata,dt)
-  add_vel_acc_to_data(modeldata,dt,suffix='_ref')
+  add_vel_acc_to_data(allmodeldata,dt)
+  add_vel_acc_to_data(allmodeldata,dt,suffix='_ref')
+  add_vel_acc_to_data(realdata,dt)
   
   # compute response times
-  add_response_times(modeldata,accmag_thresh,suffix='_ref')
+  add_response_times(allmodeldata,accmag_thresh,suffix='_ref')
+  add_response_times(realdata,accmag_thresh)
+
+  # add velocity direction info
+  add_veldir(allmodeldata,sigma=sigma_smooth)
+  add_veldir(allmodeldata,sigma=None,suffix='_ref')
+  add_veldir(realdata,sigma=None)
 
   # compute turn angles
-  add_turnangles(modeldata,suffix='_ref',deltaturn=deltaturn)
+  add_turnangles(allmodeldata,suffix='_ref',deltaturn=deltaturn)
+  add_turnangles(allmodeldata,deltaturn=deltaturn)
+  add_turnangles(realdata,deltaturn=deltaturn)
+  
+  modeldata = copy.deepcopy(allmodeldata)
+  filter_trajectories(modeldata,testtrajidx)  
   
   fig,ax = plot_rpy_response(modeldata,dt,deltaturn=deltaturn)
+  fig,ax = plot_omega_response(modeldata,dt,deltaturn=deltaturn,plotall=False)
+  fig,ax = plot_omega_response(allmodeldata,dt,deltaturn=deltaturn,plotall=False)
+
   ntraj = len(modeldata['qpos'])
   
-  order = np.argsort(modeldata['turnangle'])
+  order = np.argsort(modeldata['turnangle_ref'])
   idxplot = np.r_[order[:5],order[-5:]]
 
   # plot roll pitch yaw for nplot trajectories
   fig,ax = plot_body_rpy_traj(modeldata,dt,idxplot=idxplot)
+  fig,ax = plot_body_omega_traj(modeldata,dt,idxplot=idxplot)
     
   # plot wing angles
   #plot_wing_angle_trajs(modeldata,idxplot,dosave=True)

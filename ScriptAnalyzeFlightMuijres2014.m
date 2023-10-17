@@ -54,13 +54,13 @@ for k = 1:10,
   j1 = js(end);
   rpy_curr = rpy_curr(j0:j1,:);
   for i = 1:3,
-    plot(hax(i,k), rpy_curr(:,i),'.-');
+    plot(hax(i,k), rpy_curr(:,i),'b.-');
   end
 
   rpy_curr = squeeze(rpy_loaded(j0:j1,k,:));
   for i = 1:3,
     hold(hax(i,k),'on');
-    plot(hax(i,k), rpy_curr(:,i),'.-');
+    plot(hax(i,k), rpy_curr(:,i),'r.-');
   end
 end
 
