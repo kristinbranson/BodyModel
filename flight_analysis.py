@@ -9,7 +9,7 @@ import h5py
 import scipy
 import scipy.ndimage as ndimage
 import copy
-import quaternion
+#import quaternion
 
 anglenames = ['yaw','roll','pitch']
 wingangle_rename = {'roll': 'deviation', 'yaw': 'stroke', 'pitch': 'rotation'}
@@ -71,15 +71,53 @@ def quatmultiply(q,r):
   n = n / z[...,None]
   return n
 
-def quatseq2angvel(q,dt):
+def rotate_vec_with_quat(vec, quat):
+    """Uses unit quaternion `quat` to rotate vector `vec` according to:
+
+        vec' = quat vec quat^-1.
+
+    Any number of leading batch dimensions is supported.
+
+    Technically, `quat` should be a unit quaternion, but in this particular
+    multiplication (quat vec quat^-1) it doesn't matter because an arbitrary
+    constant cancels out in the product.
+
+    Broadcasting works in both directions. That is, for example:
+    (i) vec and quat can be [1, 1, 3] and [2, 7, 4], respectively.
+    (ii) vec and quat can be [2, 7, 3] and [1, 1, 4], respectively.
+
+    Args:
+        vec: Cartesian position vector to rotate, shape (B, 3). Does not have
+            to be a unit vector.
+        quat: Rotation unit quaternion, (B, 4).
+
+    Returns:
+        Rotated vec, (B, 3,).
+    """
+    if vec[..., :-1].size > quat[..., :-1].size:
+        # Broadcast quat to vec.
+        quat = np.tile(quat, vec.shape[:-1] + (1,))
+    vec_aug = np.zeros_like(quat)
+    vec_aug[..., 1:] = vec
+    vec = quatmultiply(quat, quatmultiply(vec_aug, quatconj(quat)))
+    return vec[..., 1:]
+
+def quatseq2angvel(q,dt,theta=None):
   """
-  av = quatseq2angvel(q,dt)
+  av = quatseq2angvel(q,dt, [theta])
   q: (n,4) quaternion sequence
   dt: time step
+  theta: angle to rotate the body coordinate system around the y-axis
   computes the angular velocity in the passive aka body frame
   """
+  
   qdiff_passive = quatmultiply(quatconj(q[:-1]),q[1:])
   av = 2*qdiff_passive[:,1:]/dt
+  
+  if theta is not None:  
+    qrot = np.array([np.cos(theta/2), 0, np.sin(theta/2), 0])
+    av = rotate_vec_with_quat(av, qrot)
+  
   return av
 
 def quatseq2rpy(q):
@@ -499,14 +537,18 @@ def choose_omega_sigma(data,k=0,j=0):
   plt.legend()
   return
 
-def add_omega_to_data(data,dt,sigma=1,suffix=''):
+def add_omega_to_data(data,dt,sigma=1,suffix='',use_rotated_axes=False):
+  if use_rotated_axes:
+    theta = np.deg2rad(-47.5)
+  else:
+    theta = None
   data['omega'+suffix] = []
   for k in range(len(data['qpos'+suffix])):
     q = data['qpos'+suffix][k][:,3:]
     if sigma is not None:
       q = ndimage.gaussian_filter1d(q, sigma=sigma, axis=0, order=0, mode='nearest')
       q = q/np.linalg.norm(q,axis=-1,keepdims=True)
-    omega = quatseq2angvel(q,dt)
+    omega = quatseq2angvel(q,dt,theta=theta)
     # q = quaternion.as_quat_array(q)
     # dts = np.arange(len(q))*dt
     # omega = quaternion.angular_velocity(q,dts)
@@ -569,8 +611,8 @@ def plot_body_omega_traj(modeldata,dt,nplot=10,idxplot=None):
   keys = ['x','y','z']
   for j in range(nplot):
     traji = idxplot[j]
-    realts = np.arange(len(modeldata['roll_ref'][traji]))*dt
-    modelts = np.arange(len(modeldata['roll'][traji]))*dt
+    realts = np.arange(modeldata['omega_ref'][traji].shape[0])*dt
+    modelts = np.arange(modeldata['omega'][traji].shape[0])*dt
     responset = modeldata['response_time'][traji]
     for i,key in enumerate(keys):
       ax[i,j].plot(realts,modeldata['omega_ref'][traji][...,i],label='real')
@@ -585,14 +627,14 @@ def plot_body_omega_traj(modeldata,dt,nplot=10,idxplot=None):
   return fig,ax
 
 def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4):
-  minturnangle = -np.pi
+  minturnangle = -180 # degrees
   maxturnangle = 0
   angleturn_bin_edges = np.linspace(minturnangle,maxturnangle,nbins+1)
   angleturn_bin_edges[-1]+=1e-6
   binnames = []
   for i in range(nbins):
-    angle0 = int(angleturn_bin_edges[i]*180/np.pi)
-    angle1 = int(angleturn_bin_edges[i+1]*180/np.pi)
+    angle0 = int(angleturn_bin_edges[i])
+    angle1 = int(angleturn_bin_edges[i+1])
     if angle0 < 0:
       angle0str = f'{-angle0}L'
     elif angle0 > 0:
@@ -619,11 +661,12 @@ def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4):
   veldir_xy_ref = np.zeros((ntraj,T))
   veldir_xy_ref[:] = np.nan
   
-  def alignfun(x,t0,t1,xalign):
-    assert np.any(np.isnan(xalign)==False)
+  def alignfun(x,t0,t1):
     ndim = x.ndim
     x = np.pad(x,[(deltaturn,deltaturn),]+[(0,0),]*(ndim-1),mode='constant',constant_values=np.nan)
-    x = x[t0:t1+1]-xalign
+    x = x[t0:t1+1]
+    talign = np.nonzero(np.isnan(x)==False)[0][0]
+    x -= x[talign]
     return x
   
   for i in range(ntraj):
@@ -634,15 +677,16 @@ def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4):
     t = tresponse+deltaturn
     t0 = t-deltaturn
     t1 = t+deltaturn
+    talign = np.maximum(tresponse-deltaturn,0)
     assert (np.isnan(modeldata['veldir_xy'][i][tresponse])==False)
     assert (np.isnan(modeldata['veldir_xy_ref'][i][tresponse])==False)
-    omega[i] = alignfun(modeldata['omega'][i],t0,t1,modeldata['omega'][i][tresponse])
-    omega_ref[i] = alignfun(modeldata['omega_ref'][i],t0,t1,modeldata['omega_ref'][i][tresponse])
-    veldir_xy[i] = alignfun(modeldata['veldir_xy'][i],t0,t1,modeldata['veldir_xy'][i][tresponse])
-    veldir_xy_ref[i] = alignfun(modeldata['veldir_xy_ref'][i],t0,t1,modeldata['veldir_xy_ref'][i][tresponse])
+    omega[i] = alignfun(modeldata['omega'][i],t0,t1)*180/np.pi
+    omega_ref[i] = alignfun(modeldata['omega_ref'][i],t0,t1)*180/np.pi
+    veldir_xy[i] = alignfun(modeldata['veldir_xy'][i],t0,t1)*180/np.pi
+    veldir_xy_ref[i] = alignfun(modeldata['veldir_xy_ref'][i],t0,t1)*180/np.pi
 
   # flip angles so they are all left turns
-  turnangle_xy = modeldata['turnangle_xy'].copy()
+  turnangle_xy = modeldata['turnangle_xy']*180/np.pi
   idxpositive = turnangle_xy > 0
   turnangle_xy[idxpositive] = -turnangle_xy[idxpositive]
   # flip omega_x and omega_z
@@ -650,7 +694,7 @@ def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4):
     omega[idxpositive,:,i] = -omega[idxpositive,:,i]
   veldir_xy[idxpositive] = -veldir_xy[idxpositive]
 
-  turnangle_xy_ref = modeldata['turnangle_xy_ref'].copy()  
+  turnangle_xy_ref = modeldata['turnangle_xy_ref']*180/np.pi
   idxpositive = turnangle_xy_ref > 0
   turnangle_xy_ref[idxpositive] = -turnangle_xy_ref[idxpositive]
   # flip omega_x and omega_z
@@ -673,7 +717,7 @@ def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4):
     idxref = (turnangle_xy_ref >= angleturn_bin_edges[i]) & (turnangle_xy_ref < angleturn_bin_edges[i+1])
     meanomega_ref[i] = np.nanmean(omega_ref[idxref],axis=0)
     meanomega[i] = np.nanmean(omega[idx],axis=0)
-    # angles have been unwrapped, so 2pi offsets should be meaningful. starts at 0
+    # angles have been unwrapped, so 360 offsets should be meaningful. starts at 0
     meanveldir_xy_ref[i] = np.nanmean(veldir_xy_ref[idxref],axis=0)
     meanveldir_xy[i] = np.nanmean(veldir_xy[idx],axis=0)
     n = np.sum(np.any(np.isnan(omega[idx]),axis=-1)==False,axis=0)
@@ -691,7 +735,7 @@ def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4):
   meancolors = cmcurr((bincenters-minturnangle)/(maxturnangle-minturnangle))
   ts = np.arange(-deltaturn,deltaturn+1)*dt
   keys = ['x','y','z']
-
+  
   # plot shaded standard error
   for i in range(nbins):
     color = meancolors[i]*.5
@@ -726,11 +770,11 @@ def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4):
         ax[j,0].plot(ts,meanomega_ref[i,:,j].T,color=color,lw=2,
                     label=binnames[i])
         ax[j,1].plot(ts,meanomega[i,:,j].T,color=color,lw=2)
-        ax[j,0].set_ylabel(f'omega {keys[j]} (rad/s)')
+        ax[j,0].set_ylabel(f'omega {keys[j]} (deg/s)')
       else:
         ax[j,0].plot(ts,meanveldir_xy_ref[i].T,color=color,lw=2)
         ax[j,1].plot(ts,meanveldir_xy[i].T,color=color,lw=2)
-        ax[j,0].set_ylabel(f'Velocity heading (rad)')
+        ax[j,0].set_ylabel(f'Velocity heading (deg)')
 
       ax[j,0].grid(visible=True,axis='x')
       ax[j,1].grid(visible=True,axis='x')
@@ -1029,7 +1073,7 @@ def add_wingstroke_timing(data,suffix=''):
   data['upstrokes'+suffix] = []
   ntraj = len(data['wing_qpos'+suffix])
   for traji in range(ntraj):
-    angles = modeldata['wing_qpos'+suffix][traji]
+    angles = data['wing_qpos'+suffix][traji]
     # downstrokes go from maxima to minima
     # upstrokes go from minima to maxima
     maxima,minima = get_downstroke(angles)
@@ -1125,14 +1169,28 @@ if __name__ == "__main__":
   add_turnangles(allmodeldata,deltaturn=deltaturn)
   add_turnangles(realdata,deltaturn=deltaturn)
   
+  add_wingstroke_timing(allmodeldata,suffix='_ref')
+  add_wingstroke_timing(allmodeldata)
+  add_wingstroke_timing(realdata)
+
+  
   modeldata = copy.deepcopy(allmodeldata)
   filter_trajectories(modeldata,testtrajidx)  
   
   fig,ax = plot_rpy_response(modeldata,dt,deltaturn=deltaturn)
   fig,ax = plot_omega_response(modeldata,dt,deltaturn=deltaturn,plotall=False)
   fig,ax = plot_omega_response(allmodeldata,dt,deltaturn=deltaturn,plotall=False)
-
+  fig,ax = plot_omega_response(modeldata,dt,deltaturn=deltaturn,plotall=False,nbins=1)
   ntraj = len(modeldata['qpos'])
+
+  # jebdata = copy.deepcopy(allmodeldata)
+  # jebtrajidx = np.nonzero(np.abs(allmodeldata['traj_inds_orig'])>=ntraj_per_dataset[0])[0]
+  # filter_trajectories(allmodeldata,jebtrajidx)
+  # fig,ax = plot_omega_response(jebdata,dt,deltaturn=deltaturn,plotall=False,nbins=1)
+
+  # add_omega_to_data(jebdata,dt,sigma=sigma_smooth,use_rotated_axes=True)
+  # add_omega_to_data(jebdata,dt,suffix='_ref',sigma=None,use_rotated_axes=True)
+
   
   order = np.argsort(modeldata['turnangle_ref'])
   idxplot = np.r_[order[:5],order[-5:]]
@@ -1145,8 +1203,5 @@ if __name__ == "__main__":
   #plot_wing_angle_trajs(modeldata,idxplot,dosave=True)
   plot_wing_angle_trajs(modeldata,idxplot[[0,]])
   
-  add_wingstroke_timing(modeldata,suffix='_ref')
-  add_wingstroke_timing(modeldata)
-
   fig,ax = plot_attackangle_by_stroketype(modeldata,plotall=True)
   print('Goodbye!')
