@@ -626,40 +626,44 @@ def plot_body_omega_traj(modeldata,dt,nplot=10,idxplot=None):
   fig.tight_layout()
   return fig,ax
 
-def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4):
-  minturnangle = -180 # degrees
-  maxturnangle = 0
+def turnangle2str(angle):
+  angle = int(angle)
+  if angle < 0:
+    anglestr = f'{-angle}L'
+  elif angle > 0:
+    anglestr = f'{angle}R'
+  else:
+    anglestr = '0'
+  return anglestr
+
+def plot_compare_omega_response(modeldata,*args,**kwargs):
+  nplot = 4
+  fig,ax = plt.subplots(nplot,2,sharex=True,sharey='row',figsize=(10,10))
+  plot_omega_response(modeldata,*args,ax=ax[:,0],**kwargs,suffix='_ref')
+  plot_omega_response(modeldata,*args,ax=ax[:,1],**kwargs,suffix='')  
+  ax[0,0].legend()
+  ax[0,0].set_title('Real')
+  ax[0,1].set_title('Model')
+  fig.tight_layout()
+  return fig,ax
+
+def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4,
+                        ax=None,minturnangle=-180,maxturnangle=0,suffix=''):
+  
+  # choose bin edges
   angleturn_bin_edges = np.linspace(minturnangle,maxturnangle,nbins+1)
   angleturn_bin_edges[-1]+=1e-6
   binnames = []
   for i in range(nbins):
-    angle0 = int(angleturn_bin_edges[i])
-    angle1 = int(angleturn_bin_edges[i+1])
-    if angle0 < 0:
-      angle0str = f'{-angle0}L'
-    elif angle0 > 0:
-      angle0str = f'{angle0}R'
-    else:
-      angle0str = '0'
-    if angle1 < 0:
-      angle1str = f'{-angle1}L'
-    elif angle1 > 0:
-      angle1str = f'{angle1}R'
-    else:
-      angle1str = '0'
+    angle0 = turnangle2str(angleturn_bin_edges[i])
+    angle1 = turnangle2str(angleturn_bin_edges[i+1])
+    binnames.append(f'[{angle0},{angle1})')
       
-    binnames.append(f'[{angle0str},{angle1str})')
-      
-  ntraj = len(modeldata['roll'])
+  ntraj = len(modeldata['omega'+suffix])
   T = deltaturn*2+1
-  omega = np.zeros((ntraj,T,3))
-  omega[:] = np.nan
-  omega_ref = np.zeros((ntraj,T,3))
-  omega_ref[:] = np.nan
-  veldir_xy = np.zeros((ntraj,T))
-  veldir_xy[:] = np.nan
-  veldir_xy_ref = np.zeros((ntraj,T))
-  veldir_xy_ref[:] = np.nan
+  nplot = 4
+  plotnames = ['$\omega_x$ (deg/s)','$\omega_y$ (deg/s)','$\omega_z$ (deg/s)','Vel heading (deg)']
+  dataplot = np.zeros((ntraj,T,nplot))
   
   def alignfun(x,t0,t1):
     ndim = x.ndim
@@ -677,121 +681,73 @@ def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4):
     t = tresponse+deltaturn
     t0 = t-deltaturn
     t1 = t+deltaturn
-    talign = np.maximum(tresponse-deltaturn,0)
     assert (np.isnan(modeldata['veldir_xy'][i][tresponse])==False)
     assert (np.isnan(modeldata['veldir_xy_ref'][i][tresponse])==False)
-    omega[i] = alignfun(modeldata['omega'][i],t0,t1)*180/np.pi
-    omega_ref[i] = alignfun(modeldata['omega_ref'][i],t0,t1)*180/np.pi
-    veldir_xy[i] = alignfun(modeldata['veldir_xy'][i],t0,t1)*180/np.pi
-    veldir_xy_ref[i] = alignfun(modeldata['veldir_xy_ref'][i],t0,t1)*180/np.pi
+    dataplot[i,:,:3] = alignfun(modeldata['omega'+suffix][i],t0,t1)*180/np.pi
+    dataplot[i,:,3] = alignfun(modeldata['veldir_xy'+suffix][i],t0,t1)*180/np.pi
 
   # flip angles so they are all left turns
-  turnangle_xy = modeldata['turnangle_xy']*180/np.pi
+  turnangle_xy = modeldata['turnangle_xy'+suffix]*180/np.pi
   idxpositive = turnangle_xy > 0
   turnangle_xy[idxpositive] = -turnangle_xy[idxpositive]
-  # flip omega_x and omega_z
-  for i in [0,2]:
-    omega[idxpositive,:,i] = -omega[idxpositive,:,i]
-  veldir_xy[idxpositive] = -veldir_xy[idxpositive]
+  # flip omega_x, omega_z, veldir
+  for i in [0,2,3]:
+    dataplot[idxpositive,:,i] = -dataplot[idxpositive,:,i]
 
-  turnangle_xy_ref = modeldata['turnangle_xy_ref']*180/np.pi
-  idxpositive = turnangle_xy_ref > 0
-  turnangle_xy_ref[idxpositive] = -turnangle_xy_ref[idxpositive]
-  # flip omega_x and omega_z
-  for i in [0,2]:
-    omega_ref[idxpositive,:,i] = -omega_ref[idxpositive,:,i]
-  veldir_xy_ref[idxpositive] = -veldir_xy_ref[idxpositive]
-
-  meanomega = np.zeros((nbins,T,3))
-  meanomega_ref = np.zeros((nbins,T,3))
-  stderr_omega = np.zeros((nbins,T,3))
-  stderr_omega_ref = np.zeros((nbins,T,3))
-  meanveldir_xy = np.zeros((nbins,T))
-  meanveldir_xy_ref = np.zeros((nbins,T))
-  stderr_veldir_xy = np.zeros((nbins,T))
-  stderr_veldir_xy_ref = np.zeros((nbins,T))
-  assert np.all(turnangle_xy[np.isnan(turnangle_xy)==False] <= angleturn_bin_edges[-1])
-  assert np.all(turnangle_xy_ref[np.isnan(turnangle_xy_ref)==False] <= angleturn_bin_edges[-1])
+  meandataplot = np.zeros((nbins,T,nplot))
+  stderr_dataplot = np.zeros((nbins,T,nplot))
   for i in range(nbins):
     idx = (turnangle_xy >= angleturn_bin_edges[i]) & (turnangle_xy < angleturn_bin_edges[i+1])
-    idxref = (turnangle_xy_ref >= angleturn_bin_edges[i]) & (turnangle_xy_ref < angleturn_bin_edges[i+1])
-    meanomega_ref[i] = np.nanmean(omega_ref[idxref],axis=0)
-    meanomega[i] = np.nanmean(omega[idx],axis=0)
-    # angles have been unwrapped, so 360 offsets should be meaningful. starts at 0
-    meanveldir_xy_ref[i] = np.nanmean(veldir_xy_ref[idxref],axis=0)
-    meanveldir_xy[i] = np.nanmean(veldir_xy[idx],axis=0)
-    n = np.sum(np.any(np.isnan(omega[idx]),axis=-1)==False,axis=0)
-    nref = np.sum(np.any(np.isnan(omega_ref[idxref]),axis=-1)==False,axis=0)
-    stderr_omega_ref[i] = np.nanstd(omega_ref[idxref],axis=0)/np.sqrt(nref[...,None])
-    stderr_omega[i] = np.nanstd(omega[idx],axis=0)/np.sqrt(n[...,None])
-    n = np.sum(np.isnan(veldir_xy[idx])==False,axis=0)
-    nref = np.sum(np.isnan(veldir_xy_ref[idxref])==False,axis=0)
-    stderr_veldir_xy_ref[i] = np.nanstd(veldir_xy_ref[idxref],axis=0)/np.sqrt(nref)
-    stderr_veldir_xy[i] = np.nanstd(veldir_xy[idx],axis=0)/np.sqrt(n)
+    # omega should be near 0, so taking averages should be fine
+    # veldir_xy angles have been unwrapped, so 360 offsets should be meaningful. starts at 0
+    meandataplot[i] = np.nanmean(dataplot[idx],axis=0)
+    n = np.sum(np.any(np.isnan(dataplot[idx]),axis=-1)==False,axis=0)
+    stderr_dataplot[i] = np.nanstd(dataplot[idx],axis=0)/np.sqrt(n[...,None])
 
-  fig,ax = plt.subplots(4,2,sharex=True,sharey='row',figsize=(10,10))
+  if ax is None:
+    createdfig = True
+    fig,ax = plt.subplots(nplot,1,sharex=True,sharey='row',figsize=(10,10))
+  else:
+    createdfig = False
+    
   cmcurr = matplotlib.colormaps.get_cmap('jet')
   bincenters = (angleturn_bin_edges[:-1]+angleturn_bin_edges[1:])/2
   meancolors = cmcurr((bincenters-minturnangle)/(maxturnangle-minturnangle))
   ts = np.arange(-deltaturn,deltaturn+1)*dt
-  keys = ['x','y','z']
   
   # plot shaded standard error
   for i in range(nbins):
     color = meancolors[i]*.5
-    for j in range(3):
-      ax[j,0].fill_between(ts,meanomega_ref[i,:,j]-stderr_omega_ref[i,:,j],
-                           meanomega_ref[i,:,j]+stderr_omega_ref[i,:,j],color=color,alpha=.5,
-                           linestyle='None')
-      ax[j,1].fill_between(ts,meanomega[i,:,j]-stderr_omega[i,:,j],
-                           meanomega[i,:,j]+stderr_omega[i,:,j],color=color,alpha=.5,
-                           linestyle='None')
-    ax[-1,0].fill_between(ts,meanveldir_xy_ref[i]-stderr_veldir_xy_ref[i],
-                          meanveldir_xy_ref[i]+stderr_veldir_xy_ref[i],color=color,alpha=.5,
-                          linestyle='None')
-    ax[-1,1].fill_between(ts,meanveldir_xy[i]-stderr_veldir_xy[i],
-                          meanveldir_xy[i]+stderr_veldir_xy[i],color=color,alpha=.5,
-                          linestyle='None')
+    for j in range(nplot):
+      ax[j].fill_between(ts,meandataplot[i,:,j]-stderr_dataplot[i,:,j],
+                         meandataplot[i,:,j]+stderr_dataplot[i,:,j],color=color,alpha=.5,
+                         linestyle='None')
   if plotall:
     for i in range(nbins):
       idx = (turnangle_xy >= angleturn_bin_edges[i]) & (turnangle_xy < angleturn_bin_edges[i+1])
       for k in np.nonzero(idx)[0]:
-        for j in range(3):
+        for j in range(nplot):
           color = np.array(cmcurr((turnangle_xy[k]-minturnangle)/(maxturnangle-minturnangle))[:3])
           color = color*.5 + .25
-          ax[j,0].plot(ts,omega_ref[k,:,j].T,color=color,lw=.25)
-          ax[j,1].plot(ts,omega[k,:,j].T,color=color,lw=.25)
-        ax[-1,0].plot(ts,veldir_xy_ref[k].T,color=color,lw=.25)
-        ax[-1,1].plot(ts,veldir_xy[k].T,color=color,lw=.25)
-  for i in range(nbins):
-    for j in range(4):
+          ax[j].plot(ts,dataplot[k,:,j].T,color=color,lw=.25)
+
+  for j in range(nplot):
+    for i in range(nbins):
       color = meancolors[i]*.5
-      if j < 3:
-        ax[j,0].plot(ts,meanomega_ref[i,:,j].T,color=color,lw=2,
-                    label=binnames[i])
-        ax[j,1].plot(ts,meanomega[i,:,j].T,color=color,lw=2)
-        ax[j,0].set_ylabel(f'omega {keys[j]} (deg/s)')
-      else:
-        ax[j,0].plot(ts,meanveldir_xy_ref[i].T,color=color,lw=2)
-        ax[j,1].plot(ts,meanveldir_xy[i].T,color=color,lw=2)
-        ax[j,0].set_ylabel(f'Velocity heading (deg)')
+      ax[j].plot(ts,meandataplot[i,:,j].T,color=color,lw=2)
+    ax[j].set_ylabel(plotnames[j])
+    ax[j].grid(visible=True,axis='x')
 
-      ax[j,0].grid(visible=True,axis='x')
-      ax[j,1].grid(visible=True,axis='x')
+  ax[-1].set_xlabel('Time (s)')
 
-  ax[0,0].set_title('Real')
-  ax[0,1].set_title('Model')
-  ax[-1,0].set_xlabel('Time (s)')
-
-  for i in range(4):
-    ylim = ax[i,0].get_ylim()
-    ylim = np.max(np.abs(np.array(ylim)))
-    ax[i,0].set_ylim((-ylim,ylim))
-
-  ax[0,0].legend()
-  fig.tight_layout()
+  if createdfig:
+    ax[0].legend()
+    fig.tight_layout()
     
-  return fig,ax
+  if createdfig:
+    return fig,ax
+  else:
+    return
 
 
 def plot_rpy_response(modeldata,dt,deltaturn=200):
@@ -1101,6 +1057,12 @@ def add_wingstroke_timing(data,suffix=''):
 # def plot_stroke_variability(modeldata):
   
 #   return
+savefigformats = ['png','svg']
+def mysavefig(fig,name):
+  for fmt in savefigformats:
+    filename = f'{name}.{fmt}'
+    print(f'Saving figure to {filename}')
+    fig.savefig(filename)
 
 if __name__ == "__main__":
   print('Hello!')
@@ -1114,6 +1076,7 @@ if __name__ == "__main__":
   rpydatafile = 'rpy.mat'
   realdata = load_data(realdatafile)
   allmodeldata = load_data(modeldatafile)
+  savefigs = True
 
   # which non-flipped example does each model trajectory come from?
   ntraj_per_dataset = [92,44]
@@ -1177,20 +1140,22 @@ if __name__ == "__main__":
   modeldata = copy.deepcopy(allmodeldata)
   filter_trajectories(modeldata,testtrajidx)  
   
-  fig,ax = plot_rpy_response(modeldata,dt,deltaturn=deltaturn)
-  fig,ax = plot_omega_response(modeldata,dt,deltaturn=deltaturn,plotall=False)
-  fig,ax = plot_omega_response(allmodeldata,dt,deltaturn=deltaturn,plotall=False)
-  fig,ax = plot_omega_response(modeldata,dt,deltaturn=deltaturn,plotall=False,nbins=1)
+  #fig,ax = plot_rpy_response(modeldata,dt,deltaturn=deltaturn)
+  fig,ax = plot_compare_omega_response(modeldata,dt,deltaturn=deltaturn,plotall=False)
+  if savefigs:
+    mysavefig(fig,'omega_response')
+  fig,ax = plot_compare_omega_response(allmodeldata,dt,deltaturn=deltaturn,plotall=False)
+  if savefigs:
+    mysavefig(fig,'omega_response_all')
+  fig,ax = plot_compare_omega_response(modeldata,dt,deltaturn=deltaturn,plotall=False,nbins=1)
+  if savefigs:
+    mysavefig(fig,'omega_response_notbinned')
+
   ntraj = len(modeldata['qpos'])
 
   # jebdata = copy.deepcopy(allmodeldata)
   # jebtrajidx = np.nonzero(np.abs(allmodeldata['traj_inds_orig'])>=ntraj_per_dataset[0])[0]
   # filter_trajectories(allmodeldata,jebtrajidx)
-  # fig,ax = plot_omega_response(jebdata,dt,deltaturn=deltaturn,plotall=False,nbins=1)
-
-  # add_omega_to_data(jebdata,dt,sigma=sigma_smooth,use_rotated_axes=True)
-  # add_omega_to_data(jebdata,dt,suffix='_ref',sigma=None,use_rotated_axes=True)
-
   
   order = np.argsort(modeldata['turnangle_ref'])
   idxplot = np.r_[order[:5],order[-5:]]
@@ -1200,8 +1165,11 @@ if __name__ == "__main__":
   fig,ax = plot_body_omega_traj(modeldata,dt,idxplot=idxplot)
     
   # plot wing angles
-  #plot_wing_angle_trajs(modeldata,idxplot,dosave=True)
+  # if savefigs:
+  #   plot_wing_angle_trajs(modeldata,idxplot,dosave=True)  
   plot_wing_angle_trajs(modeldata,idxplot[[0,]])
   
   fig,ax = plot_attackangle_by_stroketype(modeldata,plotall=True)
+  if savefigs:
+    mysavefig(fig,'attackangle')
   print('Goodbye!')
