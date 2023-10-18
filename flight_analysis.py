@@ -71,6 +71,17 @@ def quatmultiply(q,r):
   n = n / z[...,None]
   return n
 
+def quatseq2angvel(q,dt):
+  """
+  av = quatseq2angvel(q,dt)
+  q: (n,4) quaternion sequence
+  dt: time step
+  computes the angular velocity in the passive aka body frame
+  """
+  qdiff_passive = quatmultiply(quatconj(q[:-1]),q[1:])
+  av = 2*qdiff_passive[:,1:]/dt
+  return av
+
 def quatseq2rpy(q):
   dq = quatmultiply(quatconj(q[:-1]),q[1:])
   drpy = quat2rpy(dq)
@@ -495,9 +506,10 @@ def add_omega_to_data(data,dt,sigma=1,suffix=''):
     if sigma is not None:
       q = ndimage.gaussian_filter1d(q, sigma=sigma, axis=0, order=0, mode='nearest')
       q = q/np.linalg.norm(q,axis=-1,keepdims=True)
-    q = quaternion.as_quat_array(q)
-    dts = np.arange(len(q))*dt
-    omega = quaternion.angular_velocity(q,dts)
+    omega = quatseq2angvel(q,dt)
+    # q = quaternion.as_quat_array(q)
+    # dts = np.arange(len(q))*dt
+    # omega = quaternion.angular_velocity(q,dts)
     data['omega'+suffix].append(omega)
   return
 
@@ -572,8 +584,7 @@ def plot_body_omega_traj(modeldata,dt,nplot=10,idxplot=None):
   fig.tight_layout()
   return fig,ax
 
-def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True):
-  nbins = 4
+def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4):
   minturnangle = -np.pi
   maxturnangle = 0
   angleturn_bin_edges = np.linspace(minturnangle,maxturnangle,nbins+1)

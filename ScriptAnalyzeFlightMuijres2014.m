@@ -9,6 +9,8 @@ dt = 1/settings_variables.fps;
 
 rpy_loaded = nan([T,ntraj,3]);
 rpy_computed = nan([T,ntraj,3]);
+omega_loaded = nan([T,ntraj,3]);
+omega_computed = nan([T,ntraj,3]);
 dts = (0:T-1)*dt;
 for k = 1:ntraj,
   q = squeeze(body_data.qbody(:,k,:));
@@ -32,11 +34,13 @@ for k = 1:ntraj,
 %   dpitch = asin(2.0 .* (dq(:,2) .* dq(:,4) - dq(:,3) .* dq(:,1)));
 %   dyaw   = atan2(2.0 .* (dq(:,3) .* dq(:,4) + dq(:,1) .* dq(:,2)) , - 1.0 + 2.0 .* (dq(:,4) .* dq(:,4) + dq(:,1) .* dq(:,1)));
   omegacurr = [droll,dpitch,dyaw];
+  omega_computed(j0:j1-1,k,:) = omegacurr;
   rpy_curr = cumsum([zeros(1,3);omegacurr]);
   rpy_computed(j0:j1,k,:) = rpy_curr;
 
   omegacurr = squeeze(body_data.omega(:,k,:))*dt;
   omegacurr = omegacurr(j0:j1-1,:);
+  omega_loaded(j0:j1-1,k,:) = omegacurr;
   rpy_curr = cumsum([zeros(1,3);omegacurr]);
   rpy_loaded(j0:j1,k,:) = rpy_curr;
 
@@ -64,7 +68,79 @@ for k = 1:10,
   end
 end
 
-save rpy.mat rpy_computed rpy_loaded dts
+
+figure(7);
+clf;
+hax = createsubplots(3,10);
+hax = reshape(hax,[3,10]);
+
+for k = 1:10,
+  omega_curr = squeeze(omega_computed(:,k,:));
+  js = find(~isnan(omega_curr(:,1)));
+  j0 = js(1);
+  j1 = js(end);
+  omega_curr = omega_curr(j0:j1,:);
+  for i = 1:3,
+    plot(hax(i,k), omega_curr(:,i),'b.-');
+  end
+
+  omega_curr = squeeze(omega_loaded(j0:j1,k,:));
+  for i = 1:3,
+    hold(hax(i,k),'on');
+    plot(hax(i,k), omega_curr(:,i),'r.-');
+  end
+end
+legend({'computed','loaded'});
+ylabel(hax(end,1),'omega')
+
+%save rpy.mat rpy_computed rpy_loaded dts
+
+%%
+
+traji = 1;
+qfloat = squeeze(body_data.qbody(:,traji,:));
+qfloat = qfloat(:,[4,1,2,3]);
+js = find(~any(isnan(qfloat),2));
+j0 = js(1);
+j1 = js(end);
+T = j1-j0+1;
+dts = ones(T,1);
+qfloat = qfloat(j0:j1,:);
+q = quaternion(qfloat);
+qi = quaternion.ones(1,1);
+
+q = normalize(q);
+
+qdiff_active = q(2:end) .* conj(q(1:end-1));
+qdiff_passive = conj(q(1:end-1)) .* q(2:end);
+
+qfloat_diff_passive = quatmultiply(quatconj(qfloat(1:end-1,:)),qfloat(2:end,:));
+
+av_passive = compact((2./1) .* qdiff_passive);
+av_passive = av_passive(:,2:4);
+
+av_float_passive = 2*qfloat_diff_passive(:,2:end);
+
+dq = qfloat_diff_passive;
+% scalar is first term
+droll  = atan2(2.0 * (dq(:,4) .* dq(:,3) + dq(:,1) .* dq(:,2)) , 1.0 - 2.0 * (dq(:,2) .* dq(:,2) + dq(:,3) .* dq(:,3)));
+dpitch = asin(2.0 * (dq(:,3) .* dq(:,1) - dq(:,4) .* dq(:,2)));
+dyaw   = atan2(2.0 * (dq(:,4) .* dq(:,1) + dq(:,2) .* dq(:,3)) , - 1.0 + 2.0 * (dq(:,1) .* dq(:,1) + dq(:,2) .* dq(:,2)));
+omegacurr = [droll,dpitch,dyaw];
+
+figure(234);
+clf;
+hax = createsubplots(3,1,.05);
+for i = 1:3,
+  plot(hax(i),av_passive(:,i),'o-');
+  hold(hax(i),'on');
+  plot(hax(i),av_float_passive(:,i),'x-');
+  plot(hax(i),omegacurr(:,i),'s-');
+  plot(hax(i),omega_computed(j0:j1,traji,i),'^-');
+  plot(hax(i),omega_loaded(j0:j1,traji,i),'.-');
+end
+legend({'quaternion passive','float passive','omegacurr','omega computed','omega loaded'});
+
 
 %% compute CoM accelerations
 
