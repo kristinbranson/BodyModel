@@ -36,6 +36,17 @@ def loadmat(matfile):
     ValueError(f'could not read mat file {matfile}')
   return f, datatype
 
+def traj_start_end(x,axis=0):
+  dim = np.ones(x.ndim,dtype=bool)
+  dim[axis] = False
+  dim = tuple(np.nonzero(dim)[0])
+  
+  js = np.nonzero(np.any(np.isnan(x)==False,axis=dim))[0]
+  j0 = js[0]
+  j1 = js[-1]
+  return j0,j1
+
+
 def quat2rpy(q):
   widx = 0
   xidx = 1
@@ -562,14 +573,11 @@ def add_vel_acc_to_data(data,dt,sigma=1,suffix=''):
   data['com_accmag'+suffix] = []
   for i in range(len(data['qpos'+suffix])):
     com_pos = data['qpos'+suffix][i][:,:3]
-    com_pos = ndimage.gaussian_filter1d(com_pos, sigma=sigma, axis=0, order=0, mode='constant',cval=np.nan)
-    #com_vel = ndimage.gaussian_filter1d(com_pos, sigma=sigma, axis=0, order=1, mode='constant',cval=np.nan)/dt
     com_vel = np.gradient(com_pos,axis=0)/dt
-    #com_vel = (com_pos[1:]-com_pos[:-1])/dt
+    com_vel = ndimage.gaussian_filter1d(com_vel, sigma=sigma, axis=0, order=0, mode='nearest')
     com_velmag = np.linalg.norm(com_vel,axis=1)
-    #com_acc = ndimage.gaussian_filter1d(com_vel, sigma=sigma, axis=0, order=1, mode='constant',cval=np.nan)/dt
-    #com_acc = np.gradient(com_vel,axis=0)/dt
-    com_acc = (com_vel[1:]-com_vel[:-1])/dt
+    com_acc = np.gradient(com_vel,axis=0)/dt
+    com_acc = ndimage.gaussian_filter1d(com_acc, sigma=sigma, axis=0, order=0, mode='nearest')
     com_accmag = np.linalg.norm(com_acc,axis=1)
     data['com_vel'+suffix].append(com_vel)
     data['com_acc'+suffix].append(com_acc)
@@ -590,10 +598,12 @@ def plot_body_rpy_traj(modeldata,dt,nplot=10,idxplot=None):
     realts = np.arange(len(modeldata['roll_ref'][traji]))*dt
     modelts = np.arange(len(modeldata['roll'][traji]))*dt
     responset = modeldata['response_time'][traji]
+    responset_ref = modeldata['response_time_ref'][traji]
     for i,key in enumerate(keys):
-      ax[i,j].plot(realts,modeldata[key+'_ref'][traji],label='real')
-      ax[i,j].plot(modelts,modeldata[key][traji],label='model')
-      ax[i,j].plot(realts[responset],modeldata[key+'_ref'][traji][responset],'ko',label='response start')
+      ax[i,j].plot(realts,modeldata[key+'_ref'][traji],color='C0',label='real')
+      ax[i,j].plot(modelts,modeldata[key][traji],color='C1',label='model')
+      ax[i,j].plot(realts[responset_ref],modeldata[key+'_ref'][traji][responset_ref],'o',color='C0',label='real start')
+      ax[i,j].plot(modelts[responset],modeldata[key][traji][responset],'o',color='C1',label='model start')
       if j == 0:
         ax[i,j].set_ylabel(key)
     ax[0,j].set_title(f'Traj {traji}, turn {modeldata["turnangle_ref"][traji]*180/np.pi:.1f}')
@@ -614,10 +624,12 @@ def plot_body_omega_traj(modeldata,dt,nplot=10,idxplot=None):
     realts = np.arange(modeldata['omega_ref'][traji].shape[0])*dt
     modelts = np.arange(modeldata['omega'][traji].shape[0])*dt
     responset = modeldata['response_time'][traji]
+    responset_ref = modeldata['response_time_ref'][traji]
     for i,key in enumerate(keys):
       ax[i,j].plot(realts,modeldata['omega_ref'][traji][...,i],label='real')
       ax[i,j].plot(modelts,modeldata['omega'][traji][...,i],label='model')
-      ax[i,j].plot(realts[responset],modeldata['omega_ref'][traji][responset,i],'ko',label='response start')
+      ax[i,j].plot(realts[responset_ref],modeldata['omega_ref'][traji][responset_ref,i],'o',label='real start')
+      ax[i,j].plot(modelts[responset],modeldata['omega'][traji][responset,i],'o',label='model start')
       if j == 0:
         ax[i,j].set_ylabel(f'omega {key} (rad/s)')
     ax[0,j].set_title(f'Traj {traji}, turn {modeldata["turnangle"][traji]*180/np.pi:.1f}')
@@ -674,15 +686,13 @@ def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4,
     return x
   
   for i in range(ntraj):
-    if np.abs(modeldata['omega'][i].shape[0]-modeldata['omega_ref'][i].shape[0]) > 10:
-      print(f'Warning: traj {i} has different lengths for model and real data')
+    tresponse = modeldata['response_time'+suffix][i]
+    if tresponse < 0:
+      print(f'Warning: traj {i} has no response time, skipping')
       continue
-    tresponse = modeldata['response_time'][i]
     t = tresponse+deltaturn
     t0 = t-deltaturn
     t1 = t+deltaturn
-    assert (np.isnan(modeldata['veldir_xy'][i][tresponse])==False)
-    assert (np.isnan(modeldata['veldir_xy_ref'][i][tresponse])==False)
     dataplot[i,:,:3] = alignfun(modeldata['omega'+suffix][i],t0,t1)*180/np.pi
     dataplot[i,:,3] = alignfun(modeldata['veldir_xy'+suffix][i],t0,t1)*180/np.pi
 
@@ -703,6 +713,7 @@ def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4,
     meandataplot[i] = np.nanmean(dataplot[idx],axis=0)
     n = np.sum(np.any(np.isnan(dataplot[idx]),axis=-1)==False,axis=0)
     stderr_dataplot[i] = np.nanstd(dataplot[idx],axis=0)/np.sqrt(n[...,None])
+    meandataplot[i][n<=1] = np.nan
 
   if ax is None:
     createdfig = True
@@ -749,7 +760,6 @@ def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4,
   else:
     return
 
-
 def plot_rpy_response(modeldata,dt,deltaturn=200):
   nbins = 4
   minturnangle = -np.pi
@@ -787,6 +797,7 @@ def plot_rpy_response(modeldata,dt,deltaturn=200):
       print(f'Warning: traj {i} has different lengths for model and real data')
       continue
     tresponse = modeldata['response_time'][i]
+    tresponse_ref = modeldata['response_time_ref'][i]
     for j,key in enumerate(keys):
       x = modeldata[key][i]
       x = np.pad(x,deltaturn,mode='constant',constant_values=np.nan)
@@ -797,6 +808,9 @@ def plot_rpy_response(modeldata,dt,deltaturn=200):
       rpy[i,:,j] = x
       x = modeldata[key+'_ref'][i]
       x = np.pad(x,deltaturn,mode='constant',constant_values=np.nan)
+      t = tresponse_ref+deltaturn
+      t0 = t-deltaturn
+      t1 = t+deltaturn
       x = x[t0:t1+1]-x[t0]
       rpy_ref[i,:,j] = x
 
@@ -864,45 +878,63 @@ def plot_rpy_response(modeldata,dt,deltaturn=200):
     
   return fig,ax
 
-def add_response_times(data,accmag_thresh,minframe_max=100,doplot=False,suffix=''):
+def add_response_times(data,accmag_thresh,minframe=100,maxframe=-50,suffix=''):
   ntraj = len(data['com_accmag'+suffix])
-  nc = int(np.ceil(np.sqrt(ntraj)))
-  nr = int(np.ceil(ntraj/nc))
-  if doplot:
-    fig,ax = plt.subplots(nr,nc,figsize=(20,30))
-    ax = ax.flatten()
-  data['response_time'] = np.zeros(ntraj,dtype=int)
+  data['response_time'+suffix] = np.zeros(ntraj,dtype=int)
   for i in range(ntraj):
     accmag = data['com_accmag'+suffix][i]
-    i1 = np.nanargmax(accmag[minframe_max:])+minframe_max
-    i0 = np.nonzero(accmag[:i1] <= accmag_thresh)[0][-1]
-    data['response_time'][i] = i0
-    if doplot:
-      ax[i].plot(accmag)
-      ax[i].plot([i0,i0],[0,2000])
+    i1 = np.nanargmax(accmag[minframe:maxframe])+minframe
+    if accmag[i1] <= accmag_thresh:
+      print(f'Warning: traj {i} has max acceleration {accmag[i1]} < threshold {accmag_thresh}')
+      data['response_time'+suffix][i] = -1
+      continue
+    i0 = np.nonzero(accmag[:i1] <= accmag_thresh)[0]
+    if len(i0) == 0:
+      print(f'Warning: traj {i} has no frames below threshold before max acc frame')
+      data['response_time'+suffix][i] = -1
+      continue
+    i0 = i0[-1]
+    data['response_time'+suffix][i] = i0
   return
 
-def add_veldir(data,suffix='',sigma=10,epsilon=1e-3,deltaturn=200):
+def plot_response_times(data,accmag_thresh):
+  
+  ntraj = len(data['com_accmag'])
+  nc = int(np.ceil(np.sqrt(ntraj)))
+  nr = int(np.ceil(ntraj/nc))
+  fig,ax = plt.subplots(nr,nc,figsize=(20,30),sharey=True)
+  ax = ax.flatten()
+  maxacc = np.max([np.max(x) for x in data['com_accmag']])
+  maxacc_ref = np.max([np.max(x) for x in data['com_accmag_ref']])
+  maxacc = np.maximum(maxacc,maxacc_ref)
+  for i in range(ntraj):
+    accmag = data['com_accmag'][i]
+    accmag_ref = data['com_accmag_ref'][i]
+    i0 = data['response_time'][i]
+    i0ref = data['response_time_ref'][i]
+    ax[i].plot(accmag,color='C0',label='acc model')
+    ax[i].plot(accmag_ref,color='C1',label='acc real')
+    if i0 >= 0:
+      ax[i].plot([i0,i0],[0,maxacc],color='C0',label='start model')
+    if i0ref >= 0:
+      ax[i].plot([i0ref,i0ref],[0,maxacc],'--',color='C1',label='start real')
+    ax[i].plot([0,len(accmag)],[accmag_thresh,accmag_thresh],color=[.6,.6,.6])
+  
+  fig.tight_layout()
+  ax[0].legend()
+  return fig,ax
+
+def add_veldir(data,suffix='',epsilon=1e-3,deltaturn=200):
   ntraj = len(data['com_vel'+suffix])
   data['veldir'+suffix] = []
   data['veldir_xy'+suffix] = []
   for i in range(ntraj):
-    vel = data['com_vel'+suffix][i].copy()
-    if sigma is not None:
-      realidx = np.nonzero(np.isnan(vel)==False)[0]
-      if realidx[0] > 0:
-        vel[:realidx[0]] = vel[realidx[0]]
-      if realidx[-1] < vel.shape[0]-1:
-        vel[realidx[-1]+1:] = vel[realidx[-1]]      
-      vel = ndimage.gaussian_filter1d(vel, sigma=sigma, axis=0, order=0, mode='nearest')
-      vel[:realidx[0]-1] = np.nan
-      vel[realidx[-1]+1:] = np.nan
-      
+    vel = data['com_vel'+suffix][i].copy()      
     z = np.linalg.norm(vel,axis=-1,keepdims=True)
     z = np.maximum(epsilon,z)
     veldir = vel / z
     veldir_xy0 = np.arctan2(veldir[:,1],veldir[:,0])
-    veldir_xy = unwrap_angleseq(veldir_xy0,t0=data['response_time'][i]-deltaturn)
+    veldir_xy = unwrap_angleseq(veldir_xy0)
     assert np.all(np.any(np.isnan(veldir),axis=-1) == np.isnan(veldir_xy))
     assert np.nanmax(np.abs(mod2pi(veldir_xy-veldir_xy0))) < 1e-3
     data['veldir'+suffix].append(veldir)
@@ -913,11 +945,17 @@ def add_turnangles(data,deltaturn=200,suffix=''):
   ntraj = len(data['com_accmag'+suffix])
   data['turnangle'+suffix] = np.zeros(ntraj)
   data['turnangle_xy'+suffix] = np.zeros(ntraj)
+
   for i in range(ntraj):
     veldir = data['veldir'+suffix][i]
     veldir_xy = data['veldir_xy'+suffix][i]
     T = np.nonzero(np.all(np.isnan(veldir),axis=1)==False)[0][-1]
-    t0 = data['response_time'][i]
+    t0 = data['response_time'+suffix][i]
+    if t0 < 0:
+      print(f'Warning: traj {i} has no response time, no turn angle')
+      data['turnangle'+suffix][i] = np.nan
+      data['turnangle_xy'+suffix][i] = np.nan
+      continue
     if t0 > T:
       print(f'Warning: traj {i} has response time {t0} > T {T}, using reference data to get turn angle')
       veldir = data['veldir_ref'][i]
@@ -932,9 +970,52 @@ def add_turnangles(data,deltaturn=200,suffix=''):
     data['turnangle'+suffix][i] = turnangle
     data['turnangle_xy'+suffix][i] = dangle_xy
     assert (np.isnan(dangle_xy)==False)
-    
+
   return
 
+def plot_turnangles(data,deltaturn=200):
+  ntraj = len(data['com_accmag'])
+  nc = int(np.ceil(np.sqrt(ntraj)))
+  nr = int(np.ceil(ntraj/nc))
+  fig,ax = plt.subplots(nr,nc,figsize=(20,30),sharey=True)
+  ax = ax.flatten()
+
+  for i in range(ntraj):
+    suffix = ''
+    veldir_xy = data['veldir_xy'+suffix][i]
+    T = np.nonzero(np.isnan(veldir_xy)==False)[0][-1]
+    t0 = data['response_time'+suffix][i]
+    t1 = np.clip(t0+deltaturn,0,T)
+    dangle_xy = data['turnangle_xy'+suffix][i]
+    ax[i].plot(veldir_xy,color='C0',label='model')
+    ax[i].plot([t0,t1],veldir_xy[[t0,t1]],'o',color='C0')
+
+    suffix = '_ref'
+    veldir_xy = data['veldir_xy'+suffix][i]
+    T = np.nonzero(np.isnan(veldir_xy)==False)[0][-1]
+    t0 = data['response_time'+suffix][i]
+    t1 = np.clip(t0+deltaturn,0,T)
+    dangle_xy = data['turnangle_xy'+suffix][i]
+    ax[i].plot(veldir_xy,color='C1',label='real')
+    ax[i].plot([t0,t1],veldir_xy[[t0,t1]],'o',color='C1')
+
+  for i in range(ntraj):
+    ylim = ax[i].get_ylim()
+    ax[i].text(0,ylim[0],f'{i}')
+    
+  fig.tight_layout()
+  ax[0].legend()
+  return fig,ax
+    
+#   plt.clf()
+#   plt.plot(data['qpos'][i][:,0],data['qpos'][i][:,1],'.-')
+#   plt.plot(data['qpos_ref'][i][:,0],data['qpos_ref'][i][:,1],'.-')
+#   plt.quiver(data['qpos'][i][::20,0],data['qpos'][i][::20,1],np.cos(data['veldir_xy'][i][::20]),np.sin(data['veldir_xy'][i][::20]),
+#              color='C2',units='dots',width=4)
+#   plt.quiver(data['qpos_ref'][i][::20,0],data['qpos_ref'][i][::20,1],np.cos(data['veldir_xy_ref'][i][::20]),np.sin(data['veldir_xy_ref'][i][::20]),
+#              color='C3',units='dots',width=4)
+#   plt.axis('equal')
+    
 def filter_trajectories(data,trajidx):
   ntraj = len(data['qpos'])
   for k,v in data.items():
@@ -987,9 +1068,7 @@ def compare_rpy_matlab(realdata,rpydatafile,dt):
   for traji in range(nplot):
     for i in range(3):
       key = keys[i]
-      js = np.nonzero(np.isnan(rpy_loaded[:,traji,i])==False)[0]
-      j0 = js[0]
-      j1 = js[-1]
+      j0,j1 = traj_start_end(rpy_loaded[:,traji,i])
       dts_mat_curr = dts_mat[j0:j1]-dts_mat[j0]
       dts_py_curr = np.arange(len(realdata[key][traji]))*dt
       ax[i,traji].plot(dts_mat_curr,rpy_loaded[j0:j1,traji,i],label='loaded')
@@ -1068,7 +1147,7 @@ if __name__ == "__main__":
   print('Hello!')
 
   accmag_thresh = .28 * 9.81 * 1e2 # 0.28 g  
-  sigma_smooth = 8 # chosen by eye so that wiggles in omega for model data look like wiggles in omega for real data
+  sigma_smooth = 12 # chosen by eye so that wiggles in omega, vel, acc for model data look like wiggles in omega for real data
   #testtrajidx = np.array([  5,   6,   8,  13,  14,  19,  22,  23,  24,  32,  43,  57,  59, 68,  75,  79,  85,  87,  90, 101, 103, 114, 117, 118, 120, 131, 132, 134, 137, 138, 148, 150, 153, 157, 173, 183, 185, 190, 194, 204, 205, 211, 213, 214, 216, 223, 226, 233, 241, 246, 258, 266, 268, 270, 271])
   testtrajidx = np.array([  5,   6,   8,  13,  14,  19,  22,  23,  24,  32,  43,  57,  59, 68,  75,  79,  85,  87,  90, 101, 103, 114, 117, 118, 120, 131, 132, 134, 137, 138, 148, 150, 153, 157, 173, 183, 185, 190, 194, 204, 205, 211, 213, 214, 216, 223, 226, 233, 241, 246, 258, 266, 268, 270, 271])
   realdatafile = 'flight-dataset_wing-qpos_not-augmented_evasion-saccade_n-traj-136.pkl'
@@ -1103,8 +1182,8 @@ if __name__ == "__main__":
 
   # compute angular velocity
   add_omega_to_data(allmodeldata,dt,sigma=sigma_smooth)
-  add_omega_to_data(allmodeldata,dt,suffix='_ref',sigma=None)
-  add_omega_to_data(realdata,dt,sigma=None)
+  add_omega_to_data(allmodeldata,dt,sigma=sigma_smooth,suffix='_ref')
+  add_omega_to_data(realdata,dt,sigma=sigma_smooth)
 
   # compute roll pitch yaw
   add_rpy_to_data(allmodeldata)
@@ -1114,23 +1193,32 @@ if __name__ == "__main__":
   compare_rpy_matlab(realdata,rpydatafile,dt)  
   
   # compute vel and acc
-  add_vel_acc_to_data(allmodeldata,dt)
-  add_vel_acc_to_data(allmodeldata,dt,suffix='_ref')
-  add_vel_acc_to_data(realdata,dt)
+  add_vel_acc_to_data(allmodeldata,dt,sigma=sigma_smooth,suffix='_ref')
+  add_vel_acc_to_data(allmodeldata,dt,sigma=sigma_smooth)
+  add_vel_acc_to_data(realdata,dt,sigma=sigma_smooth)
   
   # compute response times
   add_response_times(allmodeldata,accmag_thresh,suffix='_ref')
+  add_response_times(allmodeldata,accmag_thresh)
   add_response_times(realdata,accmag_thresh)
 
+  if savefigs:
+    fig,ax = plot_response_times(allmodeldata,accmag_thresh)
+    mysavefig(fig,'response_times')
+
   # add velocity direction info
-  add_veldir(allmodeldata,sigma=sigma_smooth)
-  add_veldir(allmodeldata,sigma=None,suffix='_ref')
-  add_veldir(realdata,sigma=None)
+  add_veldir(allmodeldata)
+  add_veldir(allmodeldata,suffix='_ref')
+  add_veldir(realdata)
 
   # compute turn angles
   add_turnangles(allmodeldata,suffix='_ref',deltaturn=deltaturn)
   add_turnangles(allmodeldata,deltaturn=deltaturn)
   add_turnangles(realdata,deltaturn=deltaturn)
+
+  if savefigs:
+    fig,ax = plot_turnangles(allmodeldata,deltaturn=deltaturn)
+    mysavefig(fig,'turnangles')
   
   add_wingstroke_timing(allmodeldata,suffix='_ref')
   add_wingstroke_timing(allmodeldata)
@@ -1160,8 +1248,8 @@ if __name__ == "__main__":
   order = np.argsort(modeldata['turnangle_ref'])
   idxplot = np.r_[order[:5],order[-5:]]
 
-  # plot roll pitch yaw for nplot trajectories
-  fig,ax = plot_body_rpy_traj(modeldata,dt,idxplot=idxplot)
+  # plot omega for nplot trajectories
+  #fig,ax = plot_body_rpy_traj(modeldata,dt,idxplot=idxplot)
   fig,ax = plot_body_omega_traj(modeldata,dt,idxplot=idxplot)
     
   # plot wing angles

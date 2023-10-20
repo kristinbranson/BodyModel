@@ -141,31 +141,7 @@ for i = 1:3,
 end
 legend({'quaternion passive','float passive','omegacurr','omega computed','omega loaded'});
 
-
-%% compute CoM accelerations
-
-g = 9.80665; % m / (s^2)
-t0 = settings_variables.trigger_frame;
-acc_thresh_g = 0.28;
-
-startts = nan(ntraj,1);
-responsets = nan(ntraj,1);
-stimstart = (t0-1)*dt;
-for k = 1:ntraj,
-  pos = squeeze(body_data.pos(:,k,:));
-  js = find(~isnan(pos(:,1)));
-  j0 = js(1);
-  j1 = js(end);
-  startts(k) = (j0-1)*dt;
-  acc0 = squeeze(body_data.accel(j0:j1,k,:));
-  accmag = sqrt(sum(acc0.^2,2));
-  accmag_g = accmag / g;
-  i0 = max(1,t0 - j0 + 1);
-  i1 = find(accmag_g(i0:end)>=acc_thresh_g,1)+i0-1;
-  responsets(k) = (i1+j0-1-1)*dt;
-end
-
-%% compute CoM accelerations
+%% compare computed and loaded pos, vel, acc
 
 g = 9.80665; % m / (s^2)
 t0 = settings_variables.trigger_frame;
@@ -184,33 +160,33 @@ acc0 = squeeze(body_data.accel(j0:j1,k,:));
 acc1 = (vel0(2:end,:)-vel0(1:end-1,:))/dt;
 accmag = sqrt(sum(acc0.^2,2));
 accmag_g = accmag / g;
-i0 = max(minresponsei,t0 - j0 + 1);
-i1 = find(accmag_g(i0:end)>=acc_thresh_g,1)+i0-1;
 
 figure(1);
 clf;
-hax = createsubplots(4,2);
+hax = createsubplots(4,2,.05);
 hax = reshape(hax,[4,2]);
+lw = 2;
 
 for i = 1:3,
-  plot(hax(i,1),vel0(:,i));
+  plot(hax(i,1),vel0(:,i),'-','LineWidth',lw);
   hold(hax(i,1),'on');
-  plot(hax(i,1),vel1(:,i));
+  plot(hax(i,1),vel1(:,i),'--','LineWidth',lw);
   ylim = get(hax(i,1),'ylim');
-  plot(hax(i,1),[i1,i1],ylim,'k-');
   set(hax(i,1),'ylim',ylim);
-  plot(hax(i,2),acc0(:,i));
+  title(hax(i,1),sprintf('vel%d',i));
+  plot(hax(i,2),acc0(:,i),'-','LineWidth',lw);
   hold(hax(i,2),'on');
-  plot(hax(i,2),acc1(:,i));
+  plot(hax(i,2),acc1(:,i),'--','LineWidth',lw);
   ylim = get(hax(i,2),'ylim');
-  plot(hax(i,2),[i1,i1],ylim,'k-');
   set(hax(i,2),'ylim',ylim);
+  title(hax(i,2),sprintf('acc%d',i));
 end
-plot(hax(4,2),accmag_g);
+axes(hax(1,1));
+legend({'loaded','computed'});
+plot(hax(4,2),accmag_g,'LineWidth',lw);
 hold(hax(4,2),'on');
-ylim = get(hax(4,2),'ylim');
-plot(hax(4,2),[i1,i1],ylim,'k-');
-set(hax(4,2),'ylim',ylim);
+plot(hax(4,2),[1,j1-j0+1],acc_thresh_g+[0,0],'k-');
+title(hax(4,2),'accmag (g)');
 
 legend(hax(1,1),{'loaded','computed'});
 
@@ -225,6 +201,7 @@ hax = createsubplots(nr,nc);
 hax = hax(:);
 startts = nan(ntraj,1);
 responsets = nan(ntraj,1);
+responsets_local = nan(ntraj,1);
 stimstart = (t0-1)*dt;
 for k = 1:ntraj,
   pos = squeeze(body_data.pos(:,k,:));
@@ -244,6 +221,7 @@ for k = 1:ntraj,
   i1 = find(accmag_g(i0:i2)<=acc_thresh_g,1,'last')+i0-1;
   %i1 = find(accmag_g(i0:end)>=acc_thresh_g,1)+i0-1;
   responsets(k) = (i1+j0-1-1)*dt;
+  responsets_local(k) = (i1-1)*dt;
   plot(hax(k),(j0-1:j0-1+numel(accmag_g)-1)*dt,accmag_g);
   axisalmosttight([],hax(k));
   hold(hax(k),'on');
