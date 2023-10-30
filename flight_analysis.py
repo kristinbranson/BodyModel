@@ -9,9 +9,11 @@ import h5py
 import scipy
 import scipy.ndimage as ndimage
 import copy
+import mpl_toolkits.mplot3d.art3d as art3d
 #import quaternion
 
 winganglenames = ['stroke','deviation','rotation']
+wingangle_rename = {'roll': 'deviation', 'yaw': 'stroke', 'pitch': 'rotation'}
 winganglename2idx = {k: i for i,k in enumerate(winganglenames)}
 WINGISTRANSFORMED = False
 G_CM_S2 = 9.81 * 1e2
@@ -84,6 +86,17 @@ def quatmultiply(q,r):
   z = np.linalg.norm(n,axis=-1)
   n = n / z[...,None]
   return n
+
+def quatrotate(q,v):
+  # rotate vector v by quaternion q
+  # q: (n,4)
+  # v: (n,3)
+  # returns: (n,3)
+  qv = np.zeros_like(q)
+  qv[...,1:] = v
+  qconj = quatconj(q)
+  qvrot = quatmultiply(q,quatmultiply(qv,qconj))
+  return qvrot[...,1:]
 
 def rotate_vec_with_quat(vec, quat):
     """Uses unit quaternion `quat` to rotate vector `vec` according to:
@@ -1488,13 +1501,10 @@ def collect_wing_angle_omega_per_stroke(data,side='left',suffix='',issteady=None
       t0 = strokestarts[j]
       t1 = strokeends[j]
       winganglecurr = data['wing_qpos'+suffix][i][t0:t1+1,angleidx]
-      tmid = np.argmin(strokecurr)
-      strokecurr = winganglecurr[:,winganglename2idx['stroke']]
-      samplephases = np.r_[np.linspace(strokecurr[0],strokecurr[tmid-1],nsample/2),
-                            np.linspace(strokecurr[tmid],strokecurr[-1],nsample/2+1)]
+      samplephases = np.linspace(0,1,nsample+1)
       samplephases = samplephases[:-1]
 
-      phasescurr = np.linspace(0,1,t1-t0)
+      phasescurr = np.linspace(0,1,t1-t0+1)
       for k in range(len(angleidx)):
         wing_angle_per_stroke[strokeidx,:,k] = np.interp(samplephases,phasescurr,winganglecurr[:,k])
       omega_per_stroke[strokeidx] = np.mean(data['omega'+suffix][i][t0:t1],axis=0)
@@ -1611,18 +1621,76 @@ def plot_compare_stroke_variability0(data,winganglename='rotation',side='left',*
   _,_,_ = plot_stroke_variability(data,suffix='',side=side,winganglename=winganglename,fig=fig,ax=ax[:,1],bin_edges=bin_edges,**kwargs)
   return
   
-  # sideoff = {'left': 0, 'right': 3}
-  # datatype_suffixes = {'real': '_ref', 'model': ''}
-  # ntraj = len(data['wing_qpos'])
-  # nstrokes = 0
-  # for datatype,suffix in datatype_suffixes.items():
-  #   for side,off in sideoff.items():
-  #     for k,idx in winganglename2idx.items():
+def plot_body_trajectory(data,i,suffix='',tskip=50,bodyl=.1,fig=None,ax=None,colortime=True,plotproj=True,
+                         maincolor=np.zeros(3),projcolor=np.array([.7,.7,.7])):
+  T = data['com'+suffix][i].shape[0]
+  if ax is None:
+    if fig is None:
+      fig = plt.figure()
+    ax = plt.axes(projection='3d')
+  minv = np.min(data['com'+suffix][i][:,:3],axis=0)
+  maxv = np.max(data['com'+suffix][i][:,:3],axis=0)
+  muv = (maxv+minv)/2
+  maxdv = np.max(maxv-minv)
+  maxdv += 2*1.1*bodyl
+  minv = muv - maxdv/2
+  maxv = muv + maxdv/2
+  limv = np.c_[minv,maxv]
+  
+  # plot projection screens
+  projcolor = [.7,.7,.7]
+  if plotproj:
+    ax.plot([minv[0],]*5,limv[1,[0,0,1,1,0]],limv[2,[0,1,1,0,0]],'-',color=projcolor)
+    ax.plot(limv[0,[0,0,1,1,0]],[maxv[1],]*5,limv[2,[0,1,1,0,0]],'-',color=projcolor)
+    ax.plot(limv[0,[0,0,1,1,0]],limv[1,[0,1,1,0,0]],[minv[2],]*5,'-',color=projcolor)
 
-  #     attackangles = [x[:,off+winganglename2idx['rotation']] for x in modeldata['wing_qpos'+suffix]]
+  if colortime:
+    cmap = matplotlib.colormaps['jet']
+    cmapproj = matplotlib.colormaps['gray']
+
+  com = data['com'+suffix][i][:,:3]
+  q = data['qpos'+suffix][i][:,3:]
+  tail = quatrotate(q,np.array([-bodyl,0,0]))
+  tail = tail + com
+
+  if colortime:
+    lc = art3d.Line3DCollection(np.concatenate((com[:-1,None,:],com[1:,None,:]),axis=1),cmap=cmap)
+    lc.set_array(np.linspace(0,1,T-1))
+    ax.add_collection(lc)
+    lc = art3d.Line3DCollection(np.concatenate((tail[:-1,None,:],tail[1:,None,:]),axis=1),cmap=cmap)
+    lc.set_array(np.linspace(0,1,T-1))
+    ax.add_collection(lc)
+  else:
+    ax.plot(com[:,0],com[:,1],com[:,2],'-',color=maincolor)
+    ax.plot(tail[:,0],tail[:,1],tail[:,2],'-',color=maincolor)
+    
+  for t in range(0,T,tskip):
+    if colortime:
+      color = cmap(t/T)
+      colorproj = cmapproj(.35+.3*t/T)
+    else:
+      color = maincolor
+
+    # plot projections on axes
+    ax.plot(minv[0],com[t,1],com[t,2],'o',color=colorproj)
+    ax.plot(com[t,0],maxv[1],com[t,2],'o',color=colorproj)
+    ax.plot(com[t,0],com[t,1],minv[2],'o',color=colorproj)
+    ax.plot([minv[0],]*2,[com[t,1],tail[t,1]],[com[t,2],tail[t,2]],'-',color=colorproj)
+    ax.plot([com[t,0],tail[t,0]],[maxv[1],]*2,[com[t,2],tail[t,2]],'-',color=colorproj)
+    ax.plot([com[t,0],tail[t,0]],[com[t,1],tail[t,1]],[minv[2],]*2,'-',color=colorproj)
+    
+    ax.plot(com[t,0],com[t,1],com[t,2],'o',color=color)
+    ax.plot([com[t,0],tail[t,0]],[com[t,1],tail[t,1]],[com[t,2],tail[t,2]],'-',color=color)
+  ax.axis('equal')
+  ax.set_xlim(minv[0],maxv[0])
+  ax.set_ylim(minv[1],maxv[1])
+  ax.set_zlim(minv[2],maxv[2])
+  ax.set_xlabel('x (cm)')
+  ax.set_ylabel('y (cm)')
+  ax.set_zlabel('z (cm)')
   
-  return
-  
+  return fig,ax,minv,maxv
+
 savefigformats = ['png','svg']
 def mysavefig(fig,name):
   for fmt in savefigformats:
@@ -1723,8 +1791,6 @@ if __name__ == "__main__":
   thresh_linear_acc_stroke,thresh_angular_acc_stroke = choose_acc_stroke_thresh(allmodeldata,suffix='_ref')
   classify_stroke_type(allmodeldata,thresh_linear_acc_stroke,thresh_angular_acc_stroke)
   classify_stroke_type(allmodeldata,thresh_linear_acc_stroke,thresh_angular_acc_stroke,suffix='_ref')
-  
-  plot_stroke_variability(allmodeldata,suffix='_ref')
   
   modeldata = copy.deepcopy(allmodeldata)
   filter_trajectories(modeldata,testtrajidx)  

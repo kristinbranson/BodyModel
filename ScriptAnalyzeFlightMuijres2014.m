@@ -363,3 +363,23 @@ legend([hunsteady,hsteady],{'Unsteady','Steady'});
 figure(8);
 clf;
 image(cat(3,~isnan(body_data.accel(:,:,1)),zeros(size(wing_data.stroke_L)),~isnan(wing_data.stroke_L)));
+
+%%
+
+[qo,qv] = prepRotate(q,v,'rotatepoint');
+q = [0.707, 0.0,  0.707, 0.0];
+v = [1,0,0];
+qo = q(:);
+qv = [0,v];
+
+
+qo = reshape(q,[  ],1);
+qo = normalize(qo);
+%Make v a quaternion
+z = zeros(nv,1,'like',v);
+qv = quaternion([ z,v ]);
+
+
+uq = qo .* qv .* conj(qo);
+up = compact(uq);
+u = up(:,2:end);
