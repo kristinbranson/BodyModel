@@ -72,10 +72,15 @@ def rpy2quat(roll: np.ndarray, pitch: np.ndarray, yaw: np.ndarray):
     q_roll = np.c_[np.cos(roll/2), np.sin(roll/2), np.zeros(sz), np.zeros(sz)]
     q_yaw = np.c_[np.cos(yaw/2), np.zeros(sz), np.zeros(sz), np.sin(yaw/2)]
     q_pitch = np.c_[np.cos(pitch/2), np.zeros(sz), np.sin(pitch/2), np.zeros(sz)]
-    return quatmultiply(quatmultiply(q_yaw, q_pitch), q_roll)
+    return quatnormalize(quatmultiply(quatnormalize(quatmultiply(q_yaw, q_pitch)), q_roll))
 
 def quatconj(q):
   return np.concatenate((q[...,[0,]],-q[...,[1,]],-q[...,[2,]],-q[...,[3,]]),axis=-1)
+
+def quatnormalize(q):
+  z = np.linalg.norm(q,axis=-1)
+  q = q / z[...,None]
+  return q
 
 def quatmultiply(q,r):
   n0 = r[...,0]*q[...,0] - r[...,1]*q[...,1] - r[...,2]*q[...,2] - r[...,3]*q[...,3]
@@ -83,8 +88,8 @@ def quatmultiply(q,r):
   n2 = r[...,0]*q[...,2] + r[...,1]*q[...,3] + r[...,2]*q[...,0] - r[...,3]*q[...,1]
   n3 = r[...,0]*q[...,3] - r[...,1]*q[...,2] + r[...,2]*q[...,1] + r[...,3]*q[...,0]
   n = np.concatenate((n0[...,None],n1[...,None],n2[...,None],n3[...,None]),axis=-1)
-  z = np.linalg.norm(n,axis=-1)
-  n = n / z[...,None]
+  # z = np.linalg.norm(n,axis=-1)
+  # n = n / z[...,None]
   return n
 
 def quatrotate(q,v):
@@ -149,7 +154,7 @@ def quatseq2angvel(q,dt,theta=None):
   return av
 
 def quatseq2rpy(q):
-  dq = quatmultiply(quatconj(q[:-1]),q[1:])
+  dq = quatnormalize(quatmultiply(quatconj(q[:-1]),q[1:]))
   drpy = quat2rpy(dq)
   sz = drpy['roll'].shape
   z = np.zeros((1,)+sz[1:])
@@ -1622,27 +1627,28 @@ def plot_compare_stroke_variability0(data,winganglename='rotation',side='left',*
   return
   
 def plot_body_trajectory(data,i,suffix='',tskip=50,bodyl=.1,fig=None,ax=None,colortime=True,plotproj=True,
-                         maincolor=np.zeros(3),projcolor=np.array([.7,.7,.7])):
+                         maincolor=np.zeros(3),projcolor=np.array([.7,.7,.7]),commarker='.',
+                         minv=None,maxv=None):
   T = data['com'+suffix][i].shape[0]
   if ax is None:
     if fig is None:
       fig = plt.figure()
     ax = plt.axes(projection='3d')
-  minv = np.min(data['com'+suffix][i][:,:3],axis=0)
-  maxv = np.max(data['com'+suffix][i][:,:3],axis=0)
-  muv = (maxv+minv)/2
-  maxdv = np.max(maxv-minv)
-  maxdv += 2*1.1*bodyl
-  minv = muv - maxdv/2
-  maxv = muv + maxdv/2
+  if minv is None or maxv is None:
+    minv = np.min(data['com'+suffix][i][:,:3],axis=0)
+    maxv = np.max(data['com'+suffix][i][:,:3],axis=0)
+    muv = (maxv+minv)/2
+    maxdv = np.max(maxv-minv)
+    maxdv += 2*1.1*bodyl
+    minv = muv - maxdv/2
+    maxv = muv + maxdv/2
   limv = np.c_[minv,maxv]
   
-  # plot projection screens
-  projcolor = [.7,.7,.7]
-  if plotproj:
-    ax.plot([minv[0],]*5,limv[1,[0,0,1,1,0]],limv[2,[0,1,1,0,0]],'-',color=projcolor)
-    ax.plot(limv[0,[0,0,1,1,0]],[maxv[1],]*5,limv[2,[0,1,1,0,0]],'-',color=projcolor)
-    ax.plot(limv[0,[0,0,1,1,0]],limv[1,[0,1,1,0,0]],[minv[2],]*5,'-',color=projcolor)
+  # # plot projection screens
+  # if plotproj:
+  #   ax.plot([minv[0],]*5,limv[1,[0,0,1,1,0]],limv[2,[0,1,1,0,0]],'-',color=projcolor)
+  #   ax.plot(limv[0,[0,0,1,1,0]],[maxv[1],]*5,limv[2,[0,1,1,0,0]],'-',color=projcolor)
+  #   ax.plot(limv[0,[0,0,1,1,0]],limv[1,[0,1,1,0,0]],[minv[2],]*5,'-',color=projcolor)
 
   if colortime:
     cmap = matplotlib.colormaps['jet']
@@ -1652,34 +1658,38 @@ def plot_body_trajectory(data,i,suffix='',tskip=50,bodyl=.1,fig=None,ax=None,col
   q = data['qpos'+suffix][i][:,3:]
   tail = quatrotate(q,np.array([-bodyl,0,0]))
   tail = tail + com
+  d = np.linalg.norm(tail-com,axis=1)
+  assert np.max(np.abs(d-bodyl)) <= .01
 
   if colortime:
     lc = art3d.Line3DCollection(np.concatenate((com[:-1,None,:],com[1:,None,:]),axis=1),cmap=cmap)
     lc.set_array(np.linspace(0,1,T-1))
     ax.add_collection(lc)
-    lc = art3d.Line3DCollection(np.concatenate((tail[:-1,None,:],tail[1:,None,:]),axis=1),cmap=cmap)
-    lc.set_array(np.linspace(0,1,T-1))
-    ax.add_collection(lc)
   else:
     ax.plot(com[:,0],com[:,1],com[:,2],'-',color=maincolor)
-    ax.plot(tail[:,0],tail[:,1],tail[:,2],'-',color=maincolor)
+    
+  if plotproj:
+    for t in range(0,T,tskip):
+      if colortime:
+        projcolor = cmapproj(.35+.3*t/T)
+      else:
+        color = maincolor
+
+      # plot projections on axes
+      ax.plot(minv[0],com[t,1],com[t,2],commarker,color=projcolor)
+      ax.plot(com[t,0],maxv[1],com[t,2],commarker,color=projcolor)
+      ax.plot(com[t,0],com[t,1],minv[2],commarker,color=projcolor)
+      ax.plot([minv[0],]*2,[com[t,1],tail[t,1]],[com[t,2],tail[t,2]],'-',color=projcolor)
+      ax.plot([com[t,0],tail[t,0]],[maxv[1],]*2,[com[t,2],tail[t,2]],'-',color=projcolor)
+      ax.plot([com[t,0],tail[t,0]],[com[t,1],tail[t,1]],[minv[2],]*2,'-',color=projcolor)
     
   for t in range(0,T,tskip):
     if colortime:
       color = cmap(t/T)
-      colorproj = cmapproj(.35+.3*t/T)
     else:
       color = maincolor
 
-    # plot projections on axes
-    ax.plot(minv[0],com[t,1],com[t,2],'o',color=colorproj)
-    ax.plot(com[t,0],maxv[1],com[t,2],'o',color=colorproj)
-    ax.plot(com[t,0],com[t,1],minv[2],'o',color=colorproj)
-    ax.plot([minv[0],]*2,[com[t,1],tail[t,1]],[com[t,2],tail[t,2]],'-',color=colorproj)
-    ax.plot([com[t,0],tail[t,0]],[maxv[1],]*2,[com[t,2],tail[t,2]],'-',color=colorproj)
-    ax.plot([com[t,0],tail[t,0]],[com[t,1],tail[t,1]],[minv[2],]*2,'-',color=colorproj)
-    
-    ax.plot(com[t,0],com[t,1],com[t,2],'o',color=color)
+    ax.plot(com[t,0],com[t,1],com[t,2],commarker,color=color)
     ax.plot([com[t,0],tail[t,0]],[com[t,1],tail[t,1]],[com[t,2],tail[t,2]],'-',color=color)
   ax.axis('equal')
   ax.set_xlim(minv[0],maxv[0])
@@ -1836,5 +1846,18 @@ if __name__ == "__main__":
     fig,ax = plot_compare_stroke_variability(allmodeldata,dt,side=side)
     if savefigs:
       mysavefig(fig,f'stroke_variability_{side}')
+      
+  tskip = 10
+  idxplot = np.r_[order[:2],order[-2:]]
+  nplot = len(idxplot)
+  nc = int(np.ceil(np.sqrt(nplot)))
+  nr = int(np.ceil(nplot/nc))
+  fig,ax = plt.subplots(nr,nc,figsize=(8*nc,8*nr),subplot_kw={'projection': '3d'})
+  ax = ax.flatten()
+  for i in range(nplot):
+    traji = idxplot[i]
+    _,_,minv_ref,maxv_ref = plot_body_trajectory(modeldata,traji,suffix='_ref',colortime=False,plotproj=True,tskip=tskip,projcolor=.7*np.ones(3),fig=fig,ax=ax[i])
+    _,_,minv,maxv = plot_body_trajectory(modeldata,traji,suffix='',colortime=True,plotproj=True,tskip=tskip,fig=fig,ax=ax[i])
+  fig.tight_layout()
     
   print('Goodbye!')
