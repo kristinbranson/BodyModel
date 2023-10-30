@@ -11,10 +11,13 @@ import scipy.ndimage as ndimage
 import copy
 #import quaternion
 
-anglenames = ['yaw','roll','pitch']
-wingangle_rename = {'roll': 'deviation', 'yaw': 'stroke', 'pitch': 'rotation'}
-angleidx = {wingangle_rename[k]: i for i,k in enumerate(anglenames)}
+winganglenames = ['stroke','deviation','rotation']
+winganglename2idx = {k: i for i,k in enumerate(winganglenames)}
 WINGISTRANSFORMED = False
+G_CM_S2 = 9.81 * 1e2
+wingsideoff = {'left': 0, 'right': 3}
+
+
 
 def loadmat(matfile):
   """
@@ -117,9 +120,10 @@ def quatseq2angvel(q,dt,theta=None):
   """
   av = quatseq2angvel(q,dt, [theta])
   q: (n,4) quaternion sequence
-  dt: time step
+  dt: time step in seconds
   theta: angle to rotate the body coordinate system around the y-axis
   computes the angular velocity in the passive aka body frame
+  units: rad / s
   """
   
   qdiff_passive = quatmultiply(quatconj(q[:-1]),q[1:])
@@ -311,10 +315,10 @@ def transform_wing_angles(angles,body_pitch_angle=47.5):
     # stroke doesn't require transformation
     
     # deviation
-    angles[:, off+angleidx['deviation']] = - angles[:, off+angleidx['deviation']]
+    angles[:, off+winganglename2idx['deviation']] = - angles[:, off+winganglename2idx['deviation']]
 
     # rotation
-    angles[:, off+angleidx['rotation']] = np.pi/2 - body_pitch_angle - angles[:, off+angleidx['rotation']]
+    angles[:, off+winganglename2idx['rotation']] = np.pi/2 - body_pitch_angle - angles[:, off+winganglename2idx['rotation']]
 
   return angles
 
@@ -433,7 +437,6 @@ def plot_attackangle_by_stroketype(modeldata,plotall=False):
   Returns:
   fig, ax
   """
-  sideoff = {'left': 0, 'right': 3}
   stroketypes = ['down','up']
   datatype_suffixes = {'real': '_ref', 'model': ''}
   meanattackangle = {}
@@ -441,8 +444,8 @@ def plot_attackangle_by_stroketype(modeldata,plotall=False):
   attackangles_per_stroke = {}
 
   for datatype,suffix in datatype_suffixes.items():
-    for side,off in sideoff.items():
-      attackangles = [x[:,off+angleidx['rotation']] for x in modeldata['wing_qpos'+suffix]]
+    for side,off in wingsideoff.items():
+      attackangles = [x[:,off+winganglename2idx['rotation']] for x in modeldata['wing_qpos'+suffix]]
       for stroketype in stroketypes:
         fn = f'{datatype}_{side}_{stroketype}'
         meanattackangle[fn],stdattackangle[fn],attackangles_per_stroke[fn] = \
@@ -458,7 +461,7 @@ def plot_attackangle_by_stroketype(modeldata,plotall=False):
   ylim = [-np.pi/2,np.pi/2]
   
   fig,ax = plt.subplots(2,2,sharex=True,sharey=True)
-  for i,side in enumerate(sideoff.keys()):
+  for i,side in enumerate(wingsideoff.keys()):
     for j,stroketype in enumerate(stroketypes):
       for k,datatype in enumerate(datatype_suffixes.keys()):
         fn = f'{datatype}_{side}_{stroketype}'
@@ -519,6 +522,9 @@ def load_data(datafile):
   if 'wings_model' in data:
     data['wing_qpos'] = data['wings_model']
     del data['wings_model']
+  if 'com_model' in data:
+    data['com'] = data['com_model']
+    del data['com_model']
     
   return data
 
@@ -566,18 +572,64 @@ def add_omega_to_data(data,dt,sigma=1,suffix='',use_rotated_axes=False):
     data['omega'+suffix].append(omega)
   return
 
+def plot_pos_vel_acc_raw(data,i=0,suffix='',fig=None,ax=None,usecom=True):
+  
+  if usecom:
+    com_pos = data['com'+suffix][i][:,:3]
+  else:
+    com_pos = data['qpos'+suffix][i][:,:3]
+  com_vel = np.gradient(com_pos,axis=0)/dt
+  com_acc = np.gradient(com_vel,axis=0)/dt
+
+  if ax is None:
+    fig,ax = plt.subplots(3,3,sharex=True,figsize=(15,10))
+  for j in range(3):
+    ax[j,0].plot(com_pos[:,j],'.-')
+    ax[j,1].plot(com_vel[:,j],'.-')
+    ax[j,2].plot(com_acc[:,j],'.-')
+  ax[0,0].set_title('pos')
+  ax[0,1].set_title('vel')
+  ax[0,2].set_title('acc')
+  
+  return fig,ax
+
+def choose_vel_acc_sigma(data,k=0,minsigma=5,maxsigma=12):
+  fig,ax = plt.subplots(3,2)
+  com_pos_ref = data['com_ref'][k]
+  com_pos = data['com'][k]
+  vel_ref = np.gradient(com_pos_ref,axis=0)/dt
+  acc_ref = np.gradient(vel_ref,axis=0)/dt
+  vel0 = np.gradient(com_pos,axis=0)/dt
+  acc0 = np.gradient(vel0,axis=0)/dt
+  for j in range(3):
+    ax[j,0].plot(vel_ref[:,j],label='real')
+    #ax[j,0].plot(vel0[:,j],label='unfiltered')
+    ax[j,1].plot(acc_ref[:,j],label='real')
+    #ax[j,1].plot(acc0[:,j],label='unfiltered')
+  for sigma in range(minsigma,maxsigma+1):
+    vel = ndimage.gaussian_filter1d(vel0, sigma=sigma, axis=0, order=0, mode='nearest')
+    acc = np.gradient(vel,axis=0)/dt
+    acc = ndimage.gaussian_filter1d(acc, sigma=sigma, axis=0, order=0, mode='nearest')
+    for j in range(3):
+      ax[j,0].plot(vel[:,j],label=f'sigma={sigma}')
+      ax[j,1].plot(acc[:,j],label=f'sigma={sigma}')
+  plt.legend()
+  return fig,ax
+
 def add_vel_acc_to_data(data,dt,sigma=1,suffix=''):
   data['com_vel'+suffix] = []
   data['com_acc'+suffix] = []
   data['com_velmag'+suffix] = []
   data['com_accmag'+suffix] = []
-  for i in range(len(data['qpos'+suffix])):
-    com_pos = data['qpos'+suffix][i][:,:3]
+  for i in range(len(data['com'+suffix])):
+    com_pos = data['com'+suffix][i][:,:3]
     com_vel = np.gradient(com_pos,axis=0)/dt
-    com_vel = ndimage.gaussian_filter1d(com_vel, sigma=sigma, axis=0, order=0, mode='nearest')
+    if sigma is not None:
+      com_vel = ndimage.gaussian_filter1d(com_vel, sigma=sigma, axis=0, order=0, mode='nearest')
     com_velmag = np.linalg.norm(com_vel,axis=1)
     com_acc = np.gradient(com_vel,axis=0)/dt
-    com_acc = ndimage.gaussian_filter1d(com_acc, sigma=sigma, axis=0, order=0, mode='nearest')
+    if sigma is not None:
+      com_acc = ndimage.gaussian_filter1d(com_acc, sigma=sigma, axis=0, order=0, mode='nearest')
     com_accmag = np.linalg.norm(com_acc,axis=1)
     data['com_vel'+suffix].append(com_vel)
     data['com_acc'+suffix].append(com_acc)
@@ -648,18 +700,20 @@ def turnangle2str(angle):
     anglestr = '0'
   return anglestr
 
-def plot_compare_omega_response(modeldata,*args,**kwargs):
-  nplot = 4
-  fig,ax = plt.subplots(nplot,2,sharex=True,sharey='row',figsize=(10,10))
-  plot_omega_response(modeldata,*args,ax=ax[:,0],**kwargs,suffix='_ref')
-  plot_omega_response(modeldata,*args,ax=ax[:,1],**kwargs,suffix='')  
+nplot_omega = 7
+
+def plot_compare_omega_response(data,*args,**kwargs):
+  nplot = nplot_omega
+  fig,ax = plt.subplots(nplot,2,sharex=True,sharey='row',figsize=(15,15))
+  plot_omega_response(data,*args,ax=ax[:,0],**kwargs,suffix='_ref')
+  plot_omega_response(data,*args,ax=ax[:,1],**kwargs,suffix='')  
   ax[0,0].legend()
   ax[0,0].set_title('Real')
   ax[0,1].set_title('Model')
   fig.tight_layout()
   return fig,ax
 
-def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4,
+def plot_omega_response(data,dt,deltaturn=200,plotall=True,nbins=4,
                         ax=None,minturnangle=-180,maxturnangle=0,suffix=''):
   
   # choose bin edges
@@ -671,33 +725,37 @@ def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4,
     angle1 = turnangle2str(angleturn_bin_edges[i+1])
     binnames.append(f'[{angle0},{angle1})')
       
-  ntraj = len(modeldata['omega'+suffix])
+  ntraj = len(data['omega'+suffix])
   T = deltaturn*2+1
-  nplot = 4
-  plotnames = ['$\omega_x$ (deg/s)','$\omega_y$ (deg/s)','$\omega_z$ (deg/s)','Vel heading (deg)']
+  nplot = nplot_omega
+  plotnames = ['$\omega_x$ (deg/s)','$\omega_y$ (deg/s)','$\omega_z$ (deg/s)','Vel heading (deg)','xy vel mag (cm/s)','xy acc mag (cm/s^2)','z acc mag (cm/s^2)']
   dataplot = np.zeros((ntraj,T,nplot))
   
-  def alignfun(x,t0,t1):
+  def alignfun(x,t0,t1,dozero=True):
     ndim = x.ndim
     x = np.pad(x,[(deltaturn,deltaturn),]+[(0,0),]*(ndim-1),mode='constant',constant_values=np.nan)
     x = x[t0:t1+1]
     talign = np.nonzero(np.isnan(x)==False)[0][0]
-    x -= x[talign]
+    if dozero:
+      x -= x[talign]
     return x
   
   for i in range(ntraj):
-    tresponse = modeldata['response_time'+suffix][i]
+    tresponse = data['response_time'+suffix][i]
     if tresponse < 0:
       print(f'Warning: traj {i} has no response time, skipping')
       continue
     t = tresponse+deltaturn
     t0 = t-deltaturn
     t1 = t+deltaturn
-    dataplot[i,:,:3] = alignfun(modeldata['omega'+suffix][i],t0,t1)*180/np.pi
-    dataplot[i,:,3] = alignfun(modeldata['veldir_xy'+suffix][i],t0,t1)*180/np.pi
+    dataplot[i,:,:3] = alignfun(data['omega'+suffix][i],t0,t1)*180/np.pi
+    dataplot[i,:,3] = alignfun(data['veldir_xy'+suffix][i],t0,t1)*180/np.pi
+    dataplot[i,:,4] = alignfun(data['velmag_xy'+suffix][i],t0,t1)
+    dataplot[i,:,5] = alignfun(data['accmag_xy'+suffix][i],t0,t1,dozero=False)
+    dataplot[i,:,6] = alignfun(np.abs(data['com_acc'+suffix][i][:,2]),t0,t1,dozero=False)
 
   # flip angles so they are all left turns
-  turnangle_xy = modeldata['turnangle_xy'+suffix]*180/np.pi
+  turnangle_xy = data['turnangle_xy'+suffix]*180/np.pi
   idxpositive = turnangle_xy > 0
   turnangle_xy[idxpositive] = -turnangle_xy[idxpositive]
   # flip omega_x, omega_z, veldir
@@ -745,7 +803,7 @@ def plot_omega_response(modeldata,dt,deltaturn=200,plotall=True,nbins=4,
   for j in range(nplot):
     for i in range(nbins):
       color = meancolors[i]*.5
-      ax[j].plot(ts,meandataplot[i,:,j].T,color=color,lw=2)
+      ax[j].plot(ts,meandataplot[i,:,j].T,color=color,lw=2,label=binnames[i])
     ax[j].set_ylabel(plotnames[j])
     ax[j].grid(visible=True,axis='x')
 
@@ -882,13 +940,25 @@ def add_response_times(data,accmag_thresh,minframe=100,maxframe=-50,suffix=''):
   ntraj = len(data['com_accmag'+suffix])
   data['response_time'+suffix] = np.zeros(ntraj,dtype=int)
   for i in range(ntraj):
-    accmag = data['com_accmag'+suffix][i]
+    dataset = data['dataset'][i]
+    
+    # if dataset == 0:
+    accmag = data['accmag'+suffix][i]
+    thresh = accmag_thresh
+    # else:
+    #   accmag = data['acc_normal'+suffix][i]
+    #   acc_tangent = data['acc_tangent'+suffix][i]
+    #   thresh = acc_normal_thresh
     i1 = np.nanargmax(accmag[minframe:maxframe])+minframe
-    if accmag[i1] <= accmag_thresh:
-      print(f'Warning: traj {i} has max acceleration {accmag[i1]} < threshold {accmag_thresh}')
+    if accmag[i1] <= thresh:
+      print(f'Warning: traj {i} has max acceleration {accmag[i1]} < threshold {thresh}')
       data['response_time'+suffix][i] = -1
       continue
-    i0 = np.nonzero(accmag[:i1] <= accmag_thresh)[0]
+    # if dataset == 0:
+    i0 = np.nonzero(accmag[:i1] <= thresh)[0]
+    # else:
+    #   i0 = np.nonzero((accmag[:i1] <= thresh) & (acc_tangent[:i1] >= acc_tangent_thresh[0]) & \
+    #     (acc_tangent[:i1] <= acc_tangent_thresh[1]))[0]
     if len(i0) == 0:
       print(f'Warning: traj {i} has no frames below threshold before max acc frame')
       data['response_time'+suffix][i] = -1
@@ -904,6 +974,7 @@ def plot_response_times(data,accmag_thresh):
   nr = int(np.ceil(ntraj/nc))
   fig,ax = plt.subplots(nr,nc,figsize=(20,30),sharey=True)
   ax = ax.flatten()
+  #maxacc = 5000
   maxacc = np.max([np.max(x) for x in data['com_accmag']])
   maxacc_ref = np.max([np.max(x) for x in data['com_accmag_ref']])
   maxacc = np.maximum(maxacc,maxacc_ref)
@@ -923,23 +994,56 @@ def plot_response_times(data,accmag_thresh):
   fig.tight_layout()
   ax[0].legend()
   return fig,ax
-
-def add_veldir(data,suffix='',epsilon=1e-3,deltaturn=200):
+  
+def add_acc_vel_dir_mag(data,suffix='',epsilon=1e-3):
   ntraj = len(data['com_vel'+suffix])
+  data['velmag'+suffix] = []
+  data['velmag_xy'+suffix] = []
   data['veldir'+suffix] = []
   data['veldir_xy'+suffix] = []
+
+  data['accdir'+suffix] = []
+  data['accdir_xy'+suffix] = []
+  data['accmag'+suffix] = []
+  data['accmag_xy'+suffix] = []
+  
+  data['acc_tangent'+suffix] = []
+  data['acc_normal'+suffix] = []
+
   for i in range(ntraj):
     vel = data['com_vel'+suffix][i].copy()      
-    z = np.linalg.norm(vel,axis=-1,keepdims=True)
-    z = np.maximum(epsilon,z)
-    veldir = vel / z
+    velmag = np.linalg.norm(vel,axis=-1,keepdims=True)
+    velmag_xy = np.linalg.norm(vel[:,:2],axis=-1)
+    veldir = vel / np.maximum(velmag,epsilon)
     veldir_xy0 = np.arctan2(veldir[:,1],veldir[:,0])
     veldir_xy = unwrap_angleseq(veldir_xy0)
     assert np.all(np.any(np.isnan(veldir),axis=-1) == np.isnan(veldir_xy))
     assert np.nanmax(np.abs(mod2pi(veldir_xy-veldir_xy0))) < 1e-3
+    data['velmag'+suffix].append(velmag[:,0])
+    data['velmag_xy'+suffix].append(velmag_xy)
     data['veldir'+suffix].append(veldir)
     data['veldir_xy'+suffix].append(veldir_xy)
+    
+    acc = data['com_acc'+suffix][i].copy()
+    accmag = np.linalg.norm(acc,axis=-1,keepdims=True)
+    accdir = acc / np.maximum(accmag,epsilon)
+    accmag_xy = np.linalg.norm(acc[:,:2],axis=-1)
+    accdir_xy0 = np.arctan2(acc[:,1],acc[:,0])
+    accdir_xy = unwrap_angleseq(accdir_xy0)
+    assert np.all(np.any(np.isnan(accdir_xy0),axis=-1) == np.isnan(accdir_xy))
+    assert np.nanmax(np.abs(mod2pi(accdir_xy-accdir_xy0))) < 1e-3
+    data['accmag'+suffix].append(accmag[:,0])
+    data['accmag_xy'+suffix].append(accmag_xy)
+    data['accdir'+suffix].append(accdir)
+    data['accdir_xy'+suffix].append(accdir_xy)
+    
+    acc_tangent = np.sum(acc*veldir,axis=-1)
+    acc_normal = np.sqrt(accmag[:,0]**2.-acc_tangent**2.)
+    data['acc_tangent'+suffix].append(acc_tangent)
+    data['acc_normal'+suffix].append(acc_normal)
+
   return  
+
 
 def add_turnangles(data,deltaturn=200,suffix=''):
   ntraj = len(data['com_accmag'+suffix])
@@ -1025,6 +1129,26 @@ def filter_trajectories(data,trajidx):
     elif (type(v) == np.ndarray) and v.shape[0] == ntraj:
       print(f'filtering ndarray {k}')
       data[k] = v[trajidx]
+    else:
+      print(f'skipping {k}')
+  return
+
+def crop_trajectories(data,tcrop0,tcrop1):
+  ntraj = len(data['qpos'])
+  for k,v in data.items():
+    if (type(v) == list) and len(v) == ntraj and type(v[0]) == np.ndarray:
+      print(f'cropping list {k}')
+      for i in range(len(v)):
+        if tcrop0 is not None:
+          v[i] = v[i][tcrop0:]
+        if tcrop1 is not None:
+          v[i] = v[i][:-tcrop1]
+    elif (type(v) == np.ndarray) and v.shape[0] == ntraj:
+      print(f'filtering ndarray {k}')
+      if tcrop0 is not None:
+        data[k] = data[k][tcrop0:]
+      if tcrop1 is not None:
+        data[k] = data[k][:-tcrop1]
     else:
       print(f'skipping {k}')
   return
@@ -1127,15 +1251,378 @@ def add_wingstroke_timing(data,suffix=''):
   
   return
 
-# def compute_acceleration_stats(realdata):
-#   mean_com_absacc = np.nanmean(np.abs(np.concatenate(realdata['com_acc'],axis=0)),axis=0)
-#   mean_com_absacc = np.nanmean(np.abs(np.concatenate(realdata['com_acc'],axis=0)),axis=0)
-#   realdata['com_acc']
-#   return
+def get_stroke_starts_ends(data,i,suffix='',issteady=None):
+  strokestarts = data['downstrokes'+suffix][i][:-1,0]
+  strokeends = data['downstrokes'+suffix][i][1:,0]
+  if issteady is not None:
+    idx = data['issteady_stroke'+suffix][i]==issteady
+    strokestarts = strokestarts[idx]
+    strokeends = strokeends[idx]
+  return strokestarts,strokeends
 
-# def plot_stroke_variability(modeldata):
+def compute_mean_stroke_dur(data,suffix=''):
+  mean_stroke_dur = 0
+  nstrokes = 0
+  ntraj = len(data['downstrokes'+suffix])
+  for i in range(ntraj):
+    strokestarts,strokeends = get_stroke_starts_ends(data,i,suffix=suffix)
+    mean_stroke_dur += np.sum(strokeends-strokestarts)
+    nstrokes += len(strokestarts)
+  mean_stroke_dur /= nstrokes
+  return mean_stroke_dur
+
+def compute_acc_per_stroke(data,dt,suffix=''):
+  ntraj = len(data['downstrokes'+suffix])
+  mean_stroke_dur = compute_mean_stroke_dur(data,suffix=suffix)
   
-#   return
+  linear_acc_stroke = []
+  angular_acc_stroke = []
+  for i in range(ntraj):
+    strokestarts,strokeends = get_stroke_starts_ends(data,i,suffix=suffix)
+    linear_acc_stroke.append(np.zeros(len(strokestarts)))
+    angular_acc_stroke.append(np.zeros((len(strokestarts),3)))
+    for j in range(len(strokestarts)):
+      t0 = strokestarts[j]
+      t1 = strokeends[j]
+      # acc in cm / s^2
+      linear_acccurr = data['com_acc'+suffix][i][t0:t1]
+      assert np.any(np.isnan(linear_acccurr)) == False
+      meanacc = np.mean(linear_acccurr,axis=0)
+      meanacc[-1] += G_CM_S2
+      # unitless
+      meanaccmag = np.linalg.norm(meanacc)/G_CM_S2
+      linear_acc_stroke[i][j] = meanaccmag
+
+      # omega is in units of rad/s -> rad / wing beat
+      omegacurr = data['omega'+suffix][i][t0:t1]*dt*mean_stroke_dur
+      # omegadot is rad / (wing beat)**2
+      omegadotcurr = omegacurr[-1]-omegacurr[0]
+      angular_acc_stroke[i][j] = np.abs(omegadotcurr)
+  
+  data['linear_acc_stroke'+suffix] = linear_acc_stroke
+  data['angular_acc_stroke'+suffix] = angular_acc_stroke
+  return
+
+def choose_acc_stroke_thresh(data,thresh_factor=.75,suffix=''):  
+  # set thresh_factor = .75 instead of .5 to get similar fractions of strokes steady 
+  # and unsteady as in Muijres 2015
+  ldatacurr = np.concatenate(data['linear_acc_stroke'+suffix][:92])
+  std_linear_acc_stroke = np.std(ldatacurr)
+  thresh_linear_acc_stroke = 1 + thresh_factor*std_linear_acc_stroke
+  
+  adatacurr = np.concatenate(data['angular_acc_stroke'+suffix][:92],axis=0)
+  std_angular_acc_stroke = np.std(adatacurr,axis=0)
+  thresh_angular_acc_stroke = thresh_factor*std_angular_acc_stroke
+  
+  # # count number of strokes below all thresholds
+  # ntraj = len(data['linear_acc_stroke'+suffix])
+  # isbelow = np.c_[ldatacurr<=thresh_linear_acc_stroke,adatacurr<=thresh_angular_acc_stroke]
+  # issteady = np.all(isbelow,axis=1)
+  
+  return thresh_linear_acc_stroke,thresh_angular_acc_stroke
+
+def classify_stroke_type(data,thresh_linear_acc_stroke,thresh_angular_acc_stroke,suffix=''):
+  ntraj = len(data['linear_acc_stroke'+suffix])
+  data['issteady_stroke'+suffix] = []
+  for i in range(ntraj):
+    linear_acc_stroke = data['linear_acc_stroke'+suffix][i]
+    angular_acc_stroke = data['angular_acc_stroke'+suffix][i]
+    issteady = np.c_[linear_acc_stroke<=thresh_linear_acc_stroke,angular_acc_stroke<=thresh_angular_acc_stroke]
+    issteady = np.all(issteady,axis=1)
+    data['issteady_stroke'+suffix].append(issteady)
+  return
+
+def hist_acc_per_stroke(data,suffix='',nbins=20,linear_bin_edges=None,angular_bin_edges=None,prct=1,issteady=None):
+  # compute histogram linear acc
+  if issteady is None:
+    datacurr = np.concatenate(data['linear_acc_stroke'+suffix])
+  else:
+    datacurr = np.concatenate([acc[tf==issteady] for acc,tf in zip(data['linear_acc_stroke'+suffix],data['issteady_stroke'+suffix])])
+  if linear_bin_edges is None:
+    bins = nbins
+    histrange = np.percentile(datacurr,[prct,100-prct])
+  else:
+    nbins = len(linear_bin_edges)-1
+    bins = linear_bin_edges
+    histrange = [linear_bin_edges[0],linear_bin_edges[-1]]
+  frac_linear,linear_bin_edges = np.histogram(datacurr,bins=bins,range=histrange)
+  frac_linear = frac_linear/len(datacurr)
+  # compute histogram for angular acc
+  isangularbins = angular_bin_edges is not None
+  for i in range(3):
+    if issteady is None:
+      datacurr = np.concatenate(data['angular_acc_stroke'+suffix],axis=0)[:,i]
+    else:
+      datacurr = np.concatenate([x[tf==issteady,i] for x,tf in zip(data['angular_acc_stroke'+suffix],data['issteady_stroke'+suffix])])
+    if isangularbins:
+      nbins = angular_bin_edges.shape[0]-1
+      bins = angular_bin_edges[:,i]
+      histrange = [angular_bin_edges[0,i],angular_bin_edges[-1,i]]
+    else:
+      bins = nbins
+      histrange = np.percentile(datacurr,[prct,100-prct])
+    frac_angular_curr,angular_bin_edges_curr = np.histogram(datacurr,bins=bins,range=histrange)
+    frac_angular_curr = frac_angular_curr/len(datacurr)
+    if i == 0:
+      frac_angular = np.zeros((nbins,3))
+      if not isangularbins:
+        angular_bin_edges = np.zeros((nbins+1,3))
+    frac_angular[:,i] = frac_angular_curr
+    angular_bin_edges[:,i] = angular_bin_edges_curr
+
+  return {'linear_bin_edges': linear_bin_edges, 'angular_bin_edges': angular_bin_edges, 
+          'frac_linear': frac_linear, 'frac_angular': frac_angular}
+
+def plot_compare_acc_per_stroke(data,nbins=20):
+  histdata_ref_all = hist_acc_per_stroke(data,suffix='_ref',nbins=nbins)
+  linear_bin_edges=histdata_ref_all['linear_bin_edges']
+  linear_bin_edges[-1] = np.inf
+  angular_bin_edges=histdata_ref_all['angular_bin_edges']
+  angular_bin_edges[-1] = np.inf
+  histdata = {}
+  histdata['Steady'] = {}
+  histdata['Unsteady'] = {}
+  
+  for issteady in [True,False]:
+    for isreal in [True,False]:
+      if isreal:
+        datatype = 'Real'
+        suffix = '_ref'
+      else:
+        datatype = 'Model'
+        suffix = ''
+      if issteady:
+        steadytype = 'Steady'
+      else:
+        steadytype = 'Unsteady'
+      histdata[steadytype][datatype] = hist_acc_per_stroke(data,suffix=suffix,
+                                                           linear_bin_edges=linear_bin_edges,
+                                                           angular_bin_edges=angular_bin_edges,
+                                                           issteady=issteady)
+  fig,ax = plt.subplots(4,2,figsize=(15,15))
+  ncompare = 2
+  def barhelper(binedges,datacurr,axcurr,off,label):
+    off = off / ncompare
+    w = .9
+    binwidth = binedges[1]-binedges[0]
+    axcurr.bar(binedges[:-1]+(1-w)/2+w*off*binwidth,datacurr,width=(binwidth*w)/ncompare,label=label)
+  for steadyi,steadykey in enumerate(histdata.keys()):
+    for reali,realkey in enumerate(histdata[steadykey].keys()):    
+      k = f'{realkey} {steadykey}'
+      histdatacurr = histdata[steadykey][realkey]
+      barhelper(linear_bin_edges,histdatacurr['frac_linear'],ax[-1,steadyi],reali,k)
+      for j in range(3):
+        barhelper(angular_bin_edges[:,j],histdatacurr['frac_angular'][:,j],ax[j,steadyi],reali,k)
+    ax[0,steadyi].legend()
+
+
+  coords = ['x','y','z']
+  for i in range(3):
+    ax[i,0].set_xlabel(f'$d \omega_{coords[i]}$ (rad/wingbeat^2)')
+  ax[-1,0].set_xlabel('Linear acc (unitless)')
+  ax[-1,0].set_ylabel('Fraction of strokes')
+  fig.tight_layout()
+  return histdata,fig,ax
+
+
+def get_canonical_wing_stroke_angle(data,side='left',suffix='',issteady=None):
+  ntraj = len(data['wing_qpos'+suffix])
+  angleidx = wingsideoff[side]+winganglename2idx['stroke']
+
+  mean_stroke_dur = int(np.round(compute_mean_stroke_dur(data,suffix=suffix)/2)*2)
+  # get canonical stroke angle 
+  meanstrokemax = 0
+  meanstrokemin = 0
+  nstrokes = 0
+  for i in range(ntraj):
+    strokestarts,strokeends = get_stroke_starts_ends(data,i,suffix=suffix,issteady=issteady)
+    for j in range(len(strokestarts)):
+      t0 = strokestarts[j]
+      t1 = strokeends[j]
+      strokecurr = data['wing_qpos'+suffix][i][t0:t1+1,angleidx]
+      tmid = np.argmin(strokecurr)
+      meanstrokemax += strokecurr[0]
+      meanstrokemin += strokecurr[tmid]
+      nstrokes += 1
+      
+  meanstrokemax = meanstrokemax/nstrokes
+  meanstrokemin = meanstrokemin/nstrokes
+
+  mindiff = np.inf
+  for i in range(ntraj):
+    strokestarts,strokeends = get_stroke_starts_ends(data,i,suffix=suffix,issteady=issteady)
+    strokedurs = strokeends-strokestarts
+    if not np.any(strokedurs == mean_stroke_dur):
+      continue
+    for j in np.nonzero(strokedurs==mean_stroke_dur)[0]:
+      t0 = strokestarts[j]
+      t1 = strokeends[j]
+      strokecurr = data['wing_qpos'+suffix][i][t0:t1+1,angleidx]
+      tmid = np.argmin(strokecurr)
+      if np.abs(tmid - mean_stroke_dur//2)<=1:
+        diffcurr = np.abs(strokecurr[0]-meanstrokemax) + np.abs(strokecurr[tmid]-meanstrokemin) + np.abs(strokecurr[-1]-meanstrokemax)
+        if diffcurr < mindiff:
+          mindiff = diffcurr
+          strokeangle = strokecurr
+          strokeinfo = {'traj': i, 't0': t0, 't1': t1}
+  return strokeangle,strokeinfo
+
+def collect_wing_angle_omega_per_stroke(data,side='left',suffix='',issteady=None,nsample=60):
+  ntraj = len(data['wing_qpos'+suffix])
+  samplephases = np.linspace(-1,1,nsample+1)
+  samplephases = samplephases[:-1]
+  angleidx = np.arange(wingsideoff[side],wingsideoff[side]+3)
+
+  nstrokes = 0
+  for i in range(ntraj):
+    strokestarts,strokeends = get_stroke_starts_ends(data,i,suffix=suffix,issteady=issteady)
+    nstrokes += len(strokestarts)
+
+  wing_angle_per_stroke = np.zeros((nstrokes,nsample,len(angleidx)))
+  omega_per_stroke = np.zeros((nstrokes,3))
+  strokeinfo = np.zeros((nstrokes,3),dtype=int)
+  strokeidx = 0
+  for i in range(ntraj):
+    strokestarts,strokeends = get_stroke_starts_ends(data,i,suffix=suffix,issteady=issteady)
+    for j in range(len(strokestarts)):
+      t0 = strokestarts[j]
+      t1 = strokeends[j]
+      winganglecurr = data['wing_qpos'+suffix][i][t0:t1+1,angleidx]
+      tmid = np.argmin(strokecurr)
+      strokecurr = winganglecurr[:,winganglename2idx['stroke']]
+      samplephases = np.r_[np.linspace(strokecurr[0],strokecurr[tmid-1],nsample/2),
+                            np.linspace(strokecurr[tmid],strokecurr[-1],nsample/2+1)]
+      samplephases = samplephases[:-1]
+
+      phasescurr = np.linspace(0,1,t1-t0)
+      for k in range(len(angleidx)):
+        wing_angle_per_stroke[strokeidx,:,k] = np.interp(samplephases,phasescurr,winganglecurr[:,k])
+      omega_per_stroke[strokeidx] = np.mean(data['omega'+suffix][i][t0:t1],axis=0)
+      strokeinfo[strokeidx] = [i,t0,t1]
+      strokeidx+=1
+      
+  return wing_angle_per_stroke,omega_per_stroke,strokeinfo
+
+def plot_stroke_variability0(data,suffix='',bin_edges=None,prct=1,nbins=4,issteady=None,side='left',winganglename='rotation',fig=None,ax=None):
+
+  isbinedges = bin_edges is not None
+  if isbinedges:
+    nbins = bin_edges.shape[0]-1
+  else:
+    bin_edges = np.zeros((nbins+1,3))
+  
+  angleidx = winganglename2idx[winganglename]
+  wing_angle_per_stroke,omega_per_stroke,strokeinfo = collect_wing_angle_omega_per_stroke(data,suffix=suffix,issteady=issteady,side=side)
+  wing_angle_per_stroke = wing_angle_per_stroke[...,angleidx]
+  nstrokes = wing_angle_per_stroke.shape[0]
+  samplephases = np.linspace(0,2*np.pi,wing_angle_per_stroke.shape[1]+1)
+  samplephases = samplephases[:-1]
+
+  cmcurr = matplotlib.colormaps.get_cmap('jet')
+  meancolors = cmcurr(np.linspace(0,1,nbins))
+
+  if ax is None:
+    fig,ax = plt.subplots(3,1,figsize=(10,15),sharex=True)
+  
+  for omegai in range(3):
+    # bin by rotation velocity
+    if isbinedges == False:
+      omegacurr = omega_per_stroke[:,omegai]
+      minmax = np.percentile(omegacurr,[prct,100-prct])
+      minmax = np.max(np.abs(minmax))
+      histrange = [-minmax,minmax]
+      bin_edges[:,omegai] = np.linspace(histrange[0],histrange[1],nbins+1)
+    binidx = np.digitize(omega_per_stroke[:,omegai],np.r_[-np.inf,bin_edges[1:-1,omegai],np.inf])
+    binidx = binidx-1
+    for bini in range(nbins):
+      idxcurr = binidx==bini
+      mu = np.median(wing_angle_per_stroke[idxcurr],axis=0)
+      sig = np.std(wing_angle_per_stroke[idxcurr],axis=0)
+      #quartile = np.percentile(wing_angle_per_stroke[idxcurr],[25,75],axis=0)
+      n = np.count_nonzero(idxcurr)
+      se = sig / np.sqrt(n)
+      ax[omegai].fill_between(samplephases,mu-se,mu+se,color=meancolors[bini,:-1]*.5+.5,alpha=.5)
+      ax[omegai].plot(samplephases,mu,color=meancolors[bini],lw=2)
+  return fig,ax,bin_edges
+
+def plot_stroke_variability(data,dt,suffix='',issteady=None,side='left',fig=None,ax=None,nsample=60,
+                            color=np.zeros(3),prct=[5,25],mean_stroke_dur=None,label=None,
+                            labelprctiles=True,fillbetween=True):
+
+  wing_angle_per_stroke,omega_per_stroke,strokeinfo = collect_wing_angle_omega_per_stroke(data,suffix=suffix,issteady=issteady,
+                                                                                          side=side,nsample=nsample)
+  if mean_stroke_dur is None:
+    mean_stroke_dur = compute_mean_stroke_dur(data,suffix=suffix)
+  samplets = np.linspace(0,mean_stroke_dur*dt,wing_angle_per_stroke.shape[1]+1)
+  samplets = samplets[:-1]
+
+  mu = np.median(wing_angle_per_stroke,axis=0)
+  color = np.array(color)
+  prct = np.sort(np.array(prct))
+  nprct = len(prct)
+  prctiles_low = np.percentile(wing_angle_per_stroke,prct,axis=0)
+  prctiles_high = np.percentile(wing_angle_per_stroke,100-prct,axis=0)
+  prctalpha = np.linspace(.25,.75,nprct)
+
+  if ax is None:
+    fig,ax = plt.subplots(len(winganglenames),1,figsize=(15,10),sharex=True)
+  
+  for i,winganglename in enumerate(winganglenames):
+    #ax[i].fill_between(samplets,prctiles[0,:,i],prctiles[1,:,i],alpha=.5,color=color)
+    for j in range(nprct):
+      if labelprctiles:
+        labelcurr = f'{prct[j]}-{100-prct[j]}%ile'
+      else:
+        labelcurr = None
+      if fillbetween:
+        ax[i].fill_between(samplets,prctiles_low[j,:,i],prctiles_high[j,:,i],color=color,alpha=prctalpha[j],label=labelcurr)
+        labelcurr = None
+      ax[i].plot(samplets,prctiles_low[j,:,i],':',color=color*prctalpha[j]+(1-prctalpha[j]),lw=1)
+      ax[i].plot(samplets,prctiles_high[j,:,i],':',color=color,lw=1)
+    ax[i].plot(samplets,mu[:,i],'-',lw=2,label=label,color=color)
+    ax[i].set_ylabel(f'{winganglename} (rad)')
+    
+  ax[-1].set_xlabel('Time (s)')
+  return fig,ax
+
+def plot_compare_stroke_variability(data,dt,side='left'):
+  mean_stroke_dur = compute_mean_stroke_dur(data,suffix='_ref')
+  fig,ax = plt.subplots(3,2,figsize=(10,10),sharex=True,sharey=True)
+  steadycolor = np.array([0,0,0])
+  unsteadycolor = np.array([0.12156862745098039, 0.4666666666666667, 0.7058823529411765])
+  
+  _,_ = plot_stroke_variability(data,dt,suffix='_ref',side=side,fig=fig,ax=ax[:,0],
+                                mean_stroke_dur=mean_stroke_dur,issteady=True,label='Steady',color=steadycolor)
+  _,_ = plot_stroke_variability(data,dt,suffix='_ref',side=side,fig=fig,ax=ax[:,0],
+                                mean_stroke_dur=mean_stroke_dur,issteady=False,label='Unsteady',color=unsteadycolor,labelprctiles=False)
+  ax[0,0].legend()
+  ax[0,0].set_title('Real')
+  _,_ = plot_stroke_variability(data,dt,suffix='',side=side,fig=fig,ax=ax[:,1],
+                                mean_stroke_dur=mean_stroke_dur,issteady=True,label='Steady',color=steadycolor)
+  _,_ = plot_stroke_variability(data,dt,suffix='',side=side,fig=fig,ax=ax[:,1],
+                                mean_stroke_dur=mean_stroke_dur,issteady=False,label='Unsteady',color=unsteadycolor,labelprctiles=False)
+  ax[0,1].set_title('Model')
+  fig.tight_layout()  
+  return fig, ax
+
+def plot_compare_stroke_variability0(data,winganglename='rotation',side='left',**kwargs):
+  fig,ax = plt.subplots(3,2,figsize=(10,15),sharex=True,sharey=True)
+  _,_,bin_edges = plot_stroke_variability(data,suffix='_ref',side=side,winganglename=winganglename,fig=fig,ax=ax[:,0],**kwargs)
+  _,_,_ = plot_stroke_variability(data,suffix='',side=side,winganglename=winganglename,fig=fig,ax=ax[:,1],bin_edges=bin_edges,**kwargs)
+  return
+  
+  # sideoff = {'left': 0, 'right': 3}
+  # datatype_suffixes = {'real': '_ref', 'model': ''}
+  # ntraj = len(data['wing_qpos'])
+  # nstrokes = 0
+  # for datatype,suffix in datatype_suffixes.items():
+  #   for side,off in sideoff.items():
+  #     for k,idx in winganglename2idx.items():
+
+  #     attackangles = [x[:,off+winganglename2idx['rotation']] for x in modeldata['wing_qpos'+suffix]]
+  
+  return
+  
 savefigformats = ['png','svg']
 def mysavefig(fig,name):
   for fmt in savefigformats:
@@ -1146,26 +1633,39 @@ def mysavefig(fig,name):
 if __name__ == "__main__":
   print('Hello!')
 
-  accmag_thresh = .28 * 9.81 * 1e2 # 0.28 g  
-  sigma_smooth = 12 # chosen by eye so that wiggles in omega, vel, acc for model data look like wiggles in omega for real data
+  accmag_thresh = .28 * G_CM_S2
+  acc_normal_thresh = .19 * G_CM_S2
+  acc_tangent_thresh = [-.17*G_CM_S2,.14*G_CM_S2]
+  sigma_smooth_linear = 10 # chosen by eye so that wiggles in vel, acc for model data look like wiggles for real data
+  sigma_smooth_angular = 20 # chosen by eye so that wiggles in omega for model data look like wiggles for real data
   #testtrajidx = np.array([  5,   6,   8,  13,  14,  19,  22,  23,  24,  32,  43,  57,  59, 68,  75,  79,  85,  87,  90, 101, 103, 114, 117, 118, 120, 131, 132, 134, 137, 138, 148, 150, 153, 157, 173, 183, 185, 190, 194, 204, 205, 211, 213, 214, 216, 223, 226, 233, 241, 246, 258, 266, 268, 270, 271])
   testtrajidx = np.array([  5,   6,   8,  13,  14,  19,  22,  23,  24,  32,  43,  57,  59, 68,  75,  79,  85,  87,  90, 101, 103, 114, 117, 118, 120, 131, 132, 134, 137, 138, 148, 150, 153, 157, 173, 183, 185, 190, 194, 204, 205, 211, 213, 214, 216, 223, 226, 233, 241, 246, 258, 266, 268, 270, 271])
   realdatafile = 'flight-dataset_wing-qpos_not-augmented_evasion-saccade_n-traj-136.pkl'
-  modeldatafile = 'analysis-rollouts-272_flight-imitation-wbpg-shaping_no-root-quat-no-height-obs_init-rot-qvel_data-hdf5_start-step-random_net-1_wing-prms-18_split-train-test_margin-0.4-pi_seed-1.pkl'
+  modeldatafile = 'data_com/analysis-rollouts-272_snapshot-31_flight-imitation-wbpg-shaping_no-root-quat-no-height-obs_init-rot-qvel_data-hdf5_start-step-random_net-1_wing-prms-18_split-train-test_margin-0.2-0.5pi_seed-1.pkl'
   rpydatafile = 'rpy.mat'
   realdata = load_data(realdatafile)
   allmodeldata = load_data(modeldatafile)
-  savefigs = True
+  savefigs = False
+  tcrop = 5 # alignment bug at the end of trajectories
+  if tcrop is not None:
+    crop_trajectories(allmodeldata,tcrop,tcrop)
+    crop_trajectories(realdata,tcrop,tcrop)
 
   # which non-flipped example does each model trajectory come from?
   ntraj_per_dataset = [92,44]
+  ntraj = len(allmodeldata['qpos'])
   allmodeldata['traj_inds_orig'] = []
+  allmodeldata['dataset'] = []
+  realdata['dataset'] = []
   off = 0
-  for n in ntraj_per_dataset:
+  for i,n in enumerate(ntraj_per_dataset):
     # list from 0 to n-1
     allmodeldata['traj_inds_orig'] += list(range(off,off+n))
     allmodeldata['traj_inds_orig'] += [-x for x in range(off,off+n)]
+    allmodeldata['dataset'] += [i,]*(2*n)
+    realdata['dataset'] += [i,]*n
     off += n
+    
   add_wing_qpos_ref(realdata,allmodeldata)
   
   # transform wing angle -- don't do this more than once!!
@@ -1181,40 +1681,34 @@ if __name__ == "__main__":
   deltaturn = int(40e-3/dt) # frame
 
   # compute angular velocity
-  add_omega_to_data(allmodeldata,dt,sigma=sigma_smooth)
-  add_omega_to_data(allmodeldata,dt,sigma=sigma_smooth,suffix='_ref')
-  add_omega_to_data(realdata,dt,sigma=sigma_smooth)
-
+  add_omega_to_data(allmodeldata,dt,sigma=sigma_smooth_angular)
+  add_omega_to_data(allmodeldata,dt,sigma=sigma_smooth_angular,suffix='_ref')
+  
   # compute roll pitch yaw
   add_rpy_to_data(allmodeldata)
   add_rpy_to_data(allmodeldata,suffix='_ref')
-  add_rpy_to_data(realdata)
   
-  compare_rpy_matlab(realdata,rpydatafile,dt)  
+  #compare_rpy_matlab(realdata,rpydatafile,dt)  
   
   # compute vel and acc
-  add_vel_acc_to_data(allmodeldata,dt,sigma=sigma_smooth,suffix='_ref')
-  add_vel_acc_to_data(allmodeldata,dt,sigma=sigma_smooth)
-  add_vel_acc_to_data(realdata,dt,sigma=sigma_smooth)
+  add_vel_acc_to_data(allmodeldata,dt,sigma=None,suffix='_ref')
+  add_vel_acc_to_data(allmodeldata,dt,sigma=sigma_smooth_linear)
+  
+  # add velocity and acceleration direction and magnitude
+  add_acc_vel_dir_mag(allmodeldata)
+  add_acc_vel_dir_mag(allmodeldata,suffix='_ref')
   
   # compute response times
   add_response_times(allmodeldata,accmag_thresh,suffix='_ref')
   add_response_times(allmodeldata,accmag_thresh)
-  add_response_times(realdata,accmag_thresh)
 
   if savefigs:
     fig,ax = plot_response_times(allmodeldata,accmag_thresh)
     mysavefig(fig,'response_times')
 
-  # add velocity direction info
-  add_veldir(allmodeldata)
-  add_veldir(allmodeldata,suffix='_ref')
-  add_veldir(realdata)
-
   # compute turn angles
   add_turnangles(allmodeldata,suffix='_ref',deltaturn=deltaturn)
   add_turnangles(allmodeldata,deltaturn=deltaturn)
-  add_turnangles(realdata,deltaturn=deltaturn)
 
   if savefigs:
     fig,ax = plot_turnangles(allmodeldata,deltaturn=deltaturn)
@@ -1222,8 +1716,15 @@ if __name__ == "__main__":
   
   add_wingstroke_timing(allmodeldata,suffix='_ref')
   add_wingstroke_timing(allmodeldata)
-  add_wingstroke_timing(realdata)
-
+  
+  compute_acc_per_stroke(allmodeldata,dt,suffix='_ref')
+  compute_acc_per_stroke(allmodeldata,dt)
+  
+  thresh_linear_acc_stroke,thresh_angular_acc_stroke = choose_acc_stroke_thresh(allmodeldata,suffix='_ref')
+  classify_stroke_type(allmodeldata,thresh_linear_acc_stroke,thresh_angular_acc_stroke)
+  classify_stroke_type(allmodeldata,thresh_linear_acc_stroke,thresh_angular_acc_stroke,suffix='_ref')
+  
+  plot_stroke_variability(allmodeldata,suffix='_ref')
   
   modeldata = copy.deepcopy(allmodeldata)
   filter_trajectories(modeldata,testtrajidx)  
@@ -1260,4 +1761,14 @@ if __name__ == "__main__":
   fig,ax = plot_attackangle_by_stroketype(modeldata,plotall=True)
   if savefigs:
     mysavefig(fig,'attackangle')
+    
+  acc_stroke_histdata,fig,ax = plot_compare_acc_per_stroke(allmodeldata)
+  if savefigs:
+    mysavefig(fig,'acc_stroke_hist')
+
+  for side in ['left','right']:
+    fig,ax = plot_compare_stroke_variability(allmodeldata,dt,side=side)
+    if savefigs:
+      mysavefig(fig,f'stroke_variability_{side}')
+    
   print('Goodbye!')
