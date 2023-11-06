@@ -10,12 +10,14 @@ import scipy
 import scipy.ndimage as ndimage
 import copy
 import mpl_toolkits.mplot3d.art3d as art3d
+import re
 #import quaternion
 
 winganglenames = ['stroke','deviation','rotation']
 wingangle_rename = {'roll': 'deviation', 'yaw': 'stroke', 'pitch': 'rotation'}
 winganglename2idx = {k: i for i,k in enumerate(winganglenames)}
 WINGISTRANSFORMED = False
+BODY_PITCH_ANGLE = 47.5
 G_CM_S2 = 9.81 * 1e2
 wingsideoff = {'left': 0, 'right': 3}
 
@@ -321,7 +323,7 @@ def quat2rpy_prior(q,rpyprev=None,epsilon=1e-15):
   return rpy,err,isgimbal
     
 
-def transform_wing_angles(angles,body_pitch_angle=47.5):
+def transform_wing_angles(angles,body_pitch_angle=BODY_PITCH_ANGLE):
 
   assert (WINGISTRANSFORMED==False)
   body_pitch_angle = np.deg2rad(body_pitch_angle)
@@ -348,7 +350,7 @@ def get_downstroke(angles):
   
   return starts,ends
   
-def plot_wing_angles(angles, linewidth=1.5, transform_model_to_data=False, dt=0.0002):
+def plot_wing_angles(angles, linewidth=1.5, transform_model_to_data=False, dt=0.0002, mint=0,fs_ticks=12,fs_labels=16):
     """
     Args:
         angles: (time, 6), the order: 
@@ -359,73 +361,66 @@ def plot_wing_angles(angles, linewidth=1.5, transform_model_to_data=False, dt=0.
     """
     angles = np.array(angles)
     if transform_model_to_data:
-        body_pitch_angle = 47.5
-        angles = transform_wing_angles(angles,body_pitch_angle)
+        angles = transform_wing_angles(angles)
     angles = np.rad2deg(angles)
 
     color_left = 'C0'
     color_right = 'C3'
     color_xaxis = [.7,.7,.7]
     downstroke_alpha = 0.09
-    fs_labels = 16
-    fs_ticks = 12
     
     factor = 1000  # Scale factor for x-axis. 1000 means ms, 1 means s.
-    x_axis = np.linspace(0, factor*angles.shape[0]*dt, angles.shape[0])
+    x_axis = np.linspace(factor*mint*dt, factor*(mint+angles.shape[0])*dt, angles.shape[0])
     # Get maxima and minima indices for downstroke rectangles.
     maxima,minima = get_downstroke(angles)
     if minima[0] < maxima[0]:
         maxima = [0] + maxima
     
-    fig = plt.figure(figsize=(14, 5))
+    fig,axs = plt.subplots(3,1,sharex=True,figsize=(14, 5))
     plt.subplots_adjust(hspace=.04)  # space between rows
     # plt.subplots_adjust(wspace=.03)  # space between columns
-    axs = []
 
     # == Yaw.
-    ax = plt.subplot(3, 1, 1)
-    axs.append(ax)
-    plt.plot([x_axis[0],x_axis[-1]],[0,0],'-',color=color_xaxis)
-    plt.plot(x_axis, angles[:, 3], color_right, linewidth=linewidth,label='Right')
-    plt.plot(x_axis, angles[:, 0], color_left, linewidth=linewidth,label='Left')
-    plt.legend()
+    ax = axs[0]
+    ax.plot([x_axis[0],x_axis[-1]],[0,0],'-',color=color_xaxis)
+    ax.plot(x_axis, angles[:, 3], color_right, linewidth=linewidth,label='Right')
+    ax.plot(x_axis, angles[:, 0], color_left, linewidth=linewidth,label='Left')
+    ax.legend()
     # Downstrokes.
-    ylim = plt.ylim()
+    ylim = np.max(np.abs(ax.get_ylim()))*np.array([-1,1])
     for maximum, minimum in zip(maxima, minima):
-        ax.add_patch(Rectangle((factor*dt*maximum, -100), factor*dt*(minimum-maximum), 200, color='k', alpha=downstroke_alpha))
-    plt.ylim(ylim)
-    plt.ylabel(f'{wingangle_rename["yaw"]}\n(deg)', fontsize=fs_labels)
-    plt.yticks(fontsize=fs_ticks)
+        ax.add_patch(Rectangle((factor*dt*(mint+maximum), -100), factor*dt*(minimum-maximum), 200, color='k', alpha=downstroke_alpha))
+    ax.set_ylim(ylim)
+    ax.set_ylabel(f'{wingangle_rename["yaw"]}\n(deg)', fontsize=fs_labels)
+    # set ax ytick fontsize
+    ax.tick_params(axis='y', labelsize=fs_ticks)
     # == Roll.
-    ax = plt.subplot(3, 1, 2,sharex=ax)
-    axs.append(ax)
-    plt.plot([x_axis[0],x_axis[-1]],[0,0],'-',color=color_xaxis)
-    plt.plot(x_axis, angles[:, 4], color_right, linewidth=linewidth,label='Right')
-    plt.plot(x_axis, angles[:, 1], color_left, linewidth=linewidth,label='Left')
-    ylim = plt.ylim()
+    ax = axs[1]
+    ax.plot([x_axis[0],x_axis[-1]],[0,0],'-',color=color_xaxis)
+    ax.plot(x_axis, angles[:, 4], color_right, linewidth=linewidth,label='Right')
+    ax.plot(x_axis, angles[:, 1], color_left, linewidth=linewidth,label='Left')
+    ylim = np.max(np.abs(ax.get_ylim()))*np.array([-1,1])
     # Downstrokes.
     for maximum, minimum in zip(maxima, minima):
-        ax.add_patch(Rectangle((factor*dt*maximum, -100), factor*dt*(minimum-maximum), 200, color='k', alpha=downstroke_alpha))
-    plt.ylim(ylim)
-    plt.ylabel(f'{wingangle_rename["roll"]}\n(deg)', fontsize=fs_labels)
-    plt.yticks(fontsize=fs_ticks)
+        ax.add_patch(Rectangle((factor*dt*(mint+maximum), -100), factor*dt*(minimum-maximum), 200, color='k', alpha=downstroke_alpha))
+    ax.set_ylim(ylim)
+    ax.set_ylabel(f'{wingangle_rename["roll"]}\n(deg)', fontsize=fs_labels)
+    ax.tick_params(axis='y', labelsize=fs_ticks)
     # == Pitch.
-    ax = plt.subplot(3, 1, 3,sharex=ax)
-    axs.append(ax)
-    plt.plot([x_axis[0],x_axis[-1]],[0,0],'-',color=color_xaxis)
-    plt.plot(x_axis, angles[:, 5], color_right, linewidth=linewidth,label='Right')
-    plt.plot(x_axis, angles[:, 2], color_left, linewidth=linewidth,label='Left')
-    ylim = plt.ylim()
+    ax = axs[2]
+    ax.plot([x_axis[0],x_axis[-1]],[0,0],'-',color=color_xaxis)
+    ax.plot(x_axis, angles[:, 5], color_right, linewidth=linewidth,label='Right')
+    ax.plot(x_axis, angles[:, 2], color_left, linewidth=linewidth,label='Left')
+    ylim = np.max(np.abs(ax.get_ylim()))*np.array([-1,1])
     # Downstrokes.
     for maximum, minimum in zip(maxima, minima):
-        ax.add_patch(Rectangle((factor*dt*maximum, -100), factor*dt*(minimum-maximum), 200, color='k', alpha=downstroke_alpha))
-    plt.ylim(ylim)
-    plt.ylabel(f'{wingangle_rename["pitch"]}\n(deg)', fontsize=fs_labels)
-    plt.xlabel('Time (ms)', fontsize=fs_labels)
-    plt.xticks(fontsize=fs_ticks)
-    plt.yticks(fontsize=fs_ticks)
+        ax.add_patch(Rectangle((factor*dt*(mint+maximum), -100), factor*dt*(minimum-maximum), 200, color='k', alpha=downstroke_alpha))
+    ax.set_ylim(ylim)
+    ax.set_ylabel(f'{wingangle_rename["pitch"]}\n(deg)', fontsize=fs_labels)
+    ax.set_xlabel('Time (ms)', fontsize=fs_labels)
+    ax.tick_params(labelsize=fs_ticks)
     
-    return fig,np.array(axs)
+    return fig,axs
 
 def compute_wingangle_stats_over_strokes(wingangles,strokets,nsample=181):
   
@@ -468,6 +463,8 @@ def plot_attackangle_by_stroketype(modeldata,plotall=False):
         fn = f'{datatype}_{side}_{stroketype}'
         meanattackangle[fn],stdattackangle[fn],attackangles_per_stroke[fn] = \
           compute_wingangle_stats_over_strokes(attackangles,modeldata[stroketype+'strokes'+suffix])
+        meanattackangle[fn]*=180/np.pi
+        stdattackangle[fn]*=180/np.pi
 
   cmcurr = matplotlib.colormaps.get_cmap('tab10')
   colors = {}
@@ -476,7 +473,7 @@ def plot_attackangle_by_stroketype(modeldata,plotall=False):
 
   nsample = list(meanattackangle.values())[0].shape[0]
   phase = np.linspace(0,np.pi,nsample)
-  ylim = [-np.pi/2,np.pi/2]
+  ylim = [-90,90]
   
   fig,ax = plt.subplots(2,2,sharex=True,sharey=True)
   for i,side in enumerate(wingsideoff.keys()):
@@ -574,7 +571,7 @@ def choose_omega_sigma(data,k=0,j=0):
 
 def add_omega_to_data(data,dt,sigma=1,suffix='',use_rotated_axes=False):
   if use_rotated_axes:
-    theta = np.deg2rad(-47.5)
+    theta = np.deg2rad(-BODY_PITCH_ANGLE)
   else:
     theta = None
   data['omega'+suffix] = []
@@ -720,19 +717,30 @@ def turnangle2str(angle):
 
 nplot_omega = 7
 
-def plot_compare_omega_response(data,*args,**kwargs):
+def plot_compare_omega_response(data,*args,nbins=4,**kwargs):
   nplot = nplot_omega
-  fig,ax = plt.subplots(nplot,2,sharex=True,sharey='row',figsize=(15,15))
-  plot_omega_response(data,*args,ax=ax[:,0],**kwargs,suffix='_ref')
-  plot_omega_response(data,*args,ax=ax[:,1],**kwargs,suffix='')  
-  ax[0,0].legend()
-  ax[0,0].set_title('Real')
-  ax[0,1].set_title('Model')
+  if nbins == 1:
+    fig,ax = plt.subplots(nplot,1,sharex=True,sharey='row',figsize=(15,15))
+    cmap = matplotlib.colormaps['tab10']
+    args_real = {'label': 'real', 'meancolors': cmap([0,]), 'ax': ax, 'suffix': '_ref'}
+    args_model = {'label': 'model', 'meancolors': cmap([1,]), 'ax': ax}
+  else:
+    fig,ax = plt.subplots(nplot,2,sharex=True,sharey='row',figsize=(15,15))
+    args_real = {'ax': ax[:,1]}
+    args_model = {'ax': ax[:,0]}
+
+  plot_omega_response(data,nbins=nbins,*args,**kwargs,**args_real)
+  plot_omega_response(data,nbins=nbins,*args,**kwargs,**args_model)  
+  ax.flatten()[0].legend()
+  if nbins > 1:
+    args_real['ax'][0].set_title('Real')
+    args_model['ax'][0].set_title('Model')
   fig.tight_layout()
   return fig,ax
 
 def plot_omega_response(data,dt,deltaturn=200,plotall=True,nbins=4,
-                        ax=None,minturnangle=-180,maxturnangle=0,suffix=''):
+                        ax=None,minturnangle=-180,maxturnangle=0,suffix='',label=None,
+                        meancolors=None):
   
   # choose bin edges
   angleturn_bin_edges = np.linspace(minturnangle,maxturnangle,nbins+1)
@@ -797,14 +805,17 @@ def plot_omega_response(data,dt,deltaturn=200,plotall=True,nbins=4,
   else:
     createdfig = False
     
-  cmcurr = matplotlib.colormaps.get_cmap('jet')
   bincenters = (angleturn_bin_edges[:-1]+angleturn_bin_edges[1:])/2
-  meancolors = cmcurr((bincenters-minturnangle)/(maxturnangle-minturnangle))
-  ts = np.arange(-deltaturn,deltaturn+1)*dt
+  if meancolors is None:
+    cmcurr = matplotlib.colormaps.get_cmap('jet')
+    meancolors = cmcurr((bincenters-minturnangle)/(maxturnangle-minturnangle))*.5
+  else:
+    cmcurr = None
+  ts = np.arange(-deltaturn,deltaturn+1)*dt*1000
   
   # plot shaded standard error
   for i in range(nbins):
-    color = meancolors[i]*.5
+    color = meancolors[i]
     for j in range(nplot):
       ax[j].fill_between(ts,meandataplot[i,:,j]-stderr_dataplot[i,:,j],
                          meandataplot[i,:,j]+stderr_dataplot[i,:,j],color=color,alpha=.5,
@@ -814,18 +825,24 @@ def plot_omega_response(data,dt,deltaturn=200,plotall=True,nbins=4,
       idx = (turnangle_xy >= angleturn_bin_edges[i]) & (turnangle_xy < angleturn_bin_edges[i+1])
       for k in np.nonzero(idx)[0]:
         for j in range(nplot):
-          color = np.array(cmcurr((turnangle_xy[k]-minturnangle)/(maxturnangle-minturnangle))[:3])
-          color = color*.5 + .25
-          ax[j].plot(ts,dataplot[k,:,j].T,color=color,lw=.25)
+          if cmcurr is None:
+            color = meancolors[i]
+          else:
+            color = np.array(cmcurr((turnangle_xy[k]-minturnangle)/(maxturnangle-minturnangle))[:3])
+          ax[j].plot(ts,dataplot[k,:,j].T,color=color,lw=.25,alpha=.5)
 
   for j in range(nplot):
     for i in range(nbins):
-      color = meancolors[i]*.5
-      ax[j].plot(ts,meandataplot[i,:,j].T,color=color,lw=2,label=binnames[i])
+      color = meancolors[i]
+      if nbins == 1:
+        labelcurr = label
+      else:
+        labelcurr = binnames[i]
+      ax[j].plot(ts,meandataplot[i,:,j].T,color=color,lw=2,label=labelcurr)
     ax[j].set_ylabel(plotnames[j])
     ax[j].grid(visible=True,axis='x')
 
-  ax[-1].set_xlabel('Time (s)')
+  ax[-1].set_xlabel('Time (ms)')
 
   if createdfig:
     ax[0].legend()
@@ -1222,10 +1239,19 @@ def compare_rpy_matlab(realdata,rpydatafile,dt):
   ax[-1,0].set_xlabel('Time (s)')
   fig.tight_layout()  
   
-def plot_wing_angle_trajs(modeldata,idxplot,dosave=False):
+def plot_wing_angle_trajs(modeldata,idxplot,mint=0,maxt=np.inf,dosave=False):
+  
+  figs = {'real': [], 'model': []}
+  axs = {'real': [], 'model': []}
+  
+  plot_args = {'fs_ticks': None, 'fs_labels': None, 'transform_model_to_data': False, 'mint': mint}
+  
   for traji in idxplot:
-    figreal,axreal = plot_wing_angles(modeldata['wing_qpos_ref'][traji],transform_model_to_data=False)
-    figmodel,axmodel = plot_wing_angles(modeldata['wing_qpos'][traji],transform_model_to_data=False)
+    
+    maxtcurr = min(min(maxt,modeldata['wing_qpos'][traji].shape[0]),modeldata['wing_qpos_ref'][traji].shape[0])
+    
+    figreal,axreal = plot_wing_angles(modeldata['wing_qpos_ref'][traji][mint:maxtcurr],**plot_args)
+    figmodel,axmodel = plot_wing_angles(modeldata['wing_qpos'][traji][mint:maxtcurr],**plot_args)
     axmodel[0].set_title('Model')
     axreal[0].set_title('Real')
     # link axes for the real and model plots
@@ -1242,10 +1268,15 @@ def plot_wing_angle_trajs(modeldata,idxplot,dosave=False):
       figmodel.savefig(f'model_wingangles_traj{traji}.svg')
       plt.close(figreal)
       plt.close(figmodel)
+    else:
+      figs['real'].append(figreal)
+      figs['model'].append(figmodel)
+      axs['real'].append(axreal)
+      axs['model'].append(axmodel)
+  return figs,axs
       
 def add_wingstroke_timing(data,suffix=''):
   
-  body_pitch_angle = 47.5
   data['downstrokes'+suffix] = []
   data['upstrokes'+suffix] = []
   ntraj = len(data['wing_qpos'+suffix])
@@ -1561,14 +1592,13 @@ def plot_stroke_variability0(data,suffix='',bin_edges=None,prct=1,nbins=4,isstea
   return fig,ax,bin_edges
 
 def plot_stroke_variability(data,dt,suffix='',issteady=None,side='left',fig=None,ax=None,nsample=60,
-                            color=np.zeros(3),prct=[5,25],mean_stroke_dur=None,label=None,
+                            color=np.zeros(3),prct=[5,25],label=None,
                             labelprctiles=True,fillbetween=True):
 
   wing_angle_per_stroke,omega_per_stroke,strokeinfo = collect_wing_angle_omega_per_stroke(data,suffix=suffix,issteady=issteady,
                                                                                           side=side,nsample=nsample)
-  if mean_stroke_dur is None:
-    mean_stroke_dur = compute_mean_stroke_dur(data,suffix=suffix)
-  samplets = np.linspace(0,mean_stroke_dur*dt,wing_angle_per_stroke.shape[1]+1)
+  wing_angle_per_stroke *= 180/np.pi
+  samplets = np.linspace(0,2*np.pi,wing_angle_per_stroke.shape[1]+1)
   samplets = samplets[:-1]
 
   mu = np.median(wing_angle_per_stroke,axis=0)
@@ -1578,6 +1608,7 @@ def plot_stroke_variability(data,dt,suffix='',issteady=None,side='left',fig=None
   prctiles_low = np.percentile(wing_angle_per_stroke,prct,axis=0)
   prctiles_high = np.percentile(wing_angle_per_stroke,100-prct,axis=0)
   prctalpha = np.linspace(.25,.75,nprct)
+  lw = .75
 
   if ax is None:
     fig,ax = plt.subplots(len(winganglenames),1,figsize=(15,10),sharex=True)
@@ -1590,53 +1621,52 @@ def plot_stroke_variability(data,dt,suffix='',issteady=None,side='left',fig=None
       else:
         labelcurr = None
       if fillbetween:
-        ax[i].fill_between(samplets,prctiles_low[j,:,i],prctiles_high[j,:,i],color=color,alpha=prctalpha[j],label=labelcurr)
+        ax[i].fill_between(samplets,prctiles_low[j,:,i],prctiles_high[j,:,i],color=color,alpha=prctalpha[j],label=labelcurr,edgecolor=None)
         labelcurr = None
-      ax[i].plot(samplets,prctiles_low[j,:,i],':',color=color*prctalpha[j]+(1-prctalpha[j]),lw=1)
-      ax[i].plot(samplets,prctiles_high[j,:,i],':',color=color,lw=1)
-    ax[i].plot(samplets,mu[:,i],'-',lw=2,label=label,color=color)
-    ax[i].set_ylabel(f'{winganglename} (rad)')
-    
-  ax[-1].set_xlabel('Time (s)')
+      else:
+        ax[i].plot(samplets,prctiles_low[j,:,i],':',color=color*prctalpha[j]+(1-prctalpha[j]),label=labelcurr,lw=lw)
+        ax[i].plot(samplets,prctiles_high[j,:,i],':',color=color*prctalpha[j]+(1-prctalpha[j]),lw=lw)
+    ax[i].plot(samplets,mu[:,i],'-',label=label,color=color,lw=lw)
+    ylim = np.abs(np.max(ax[i].get_ylim()))
+    ax[i].set_ylim(-ylim,ylim)
+    ax[i].set_ylabel(f'{winganglename} (deg)')
+    ax[i].set_xticks(np.linspace(0,2*np.pi,5))
+  ax[-1].set_xticklabels(['0','$\pi/2$','$\pi$','$3\pi/2$','$2\pi$'])    
+  ax[-1].set_xlabel('Wingbeat phase')
   return fig,ax
 
 def plot_compare_stroke_variability(data,dt,side='left'):
-  mean_stroke_dur = compute_mean_stroke_dur(data,suffix='_ref')
-  fig,ax = plt.subplots(3,2,figsize=(10,10),sharex=True,sharey=True)
+  fig,ax = plt.subplots(3,2,figsize=(10,10),sharex=True,sharey='row')
   steadycolor = np.array([0,0,0])
   unsteadycolor = np.array([0.12156862745098039, 0.4666666666666667, 0.7058823529411765])
   
   _,_ = plot_stroke_variability(data,dt,suffix='_ref',side=side,fig=fig,ax=ax[:,0],
-                                mean_stroke_dur=mean_stroke_dur,issteady=True,label='Steady',color=steadycolor)
+                                issteady=True,label='Steady',color=steadycolor,fillbetween=False)
   _,_ = plot_stroke_variability(data,dt,suffix='_ref',side=side,fig=fig,ax=ax[:,0],
-                                mean_stroke_dur=mean_stroke_dur,issteady=False,label='Unsteady',color=unsteadycolor,labelprctiles=False)
+                                issteady=False,label='Unsteady',color=unsteadycolor,labelprctiles=True,fillbetween=True)
   ax[0,0].legend()
   ax[0,0].set_title('Real')
   _,_ = plot_stroke_variability(data,dt,suffix='',side=side,fig=fig,ax=ax[:,1],
-                                mean_stroke_dur=mean_stroke_dur,issteady=True,label='Steady',color=steadycolor)
+                                issteady=True,label='Steady',color=steadycolor,fillbetween=False)
   _,_ = plot_stroke_variability(data,dt,suffix='',side=side,fig=fig,ax=ax[:,1],
-                                mean_stroke_dur=mean_stroke_dur,issteady=False,label='Unsteady',color=unsteadycolor,labelprctiles=False)
+                                issteady=False,label='Unsteady',color=unsteadycolor,labelprctiles=False,fillbetween=True)
   ax[0,1].set_title('Model')
   fig.tight_layout()  
   return fig, ax
 
-def plot_compare_stroke_variability0(data,winganglename='rotation',side='left',**kwargs):
-  fig,ax = plt.subplots(3,2,figsize=(10,15),sharex=True,sharey=True)
-  _,_,bin_edges = plot_stroke_variability(data,suffix='_ref',side=side,winganglename=winganglename,fig=fig,ax=ax[:,0],**kwargs)
-  _,_,_ = plot_stroke_variability(data,suffix='',side=side,winganglename=winganglename,fig=fig,ax=ax[:,1],bin_edges=bin_edges,**kwargs)
-  return
-  
 def plot_body_trajectory(data,i,suffix='',tskip=50,bodyl=.1,fig=None,ax=None,colortime=True,plotproj=True,
                          maincolor=np.zeros(3),projcolor=np.array([.7,.7,.7]),commarker='.',
-                         minv=None,maxv=None):
+                         minv=None,maxv=None,mint=0,maxt=np.inf,plotcb=False):
   T = data['com'+suffix][i].shape[0]
+  maxt = min(maxt,T)
+  T = maxt-mint
   if ax is None:
     if fig is None:
       fig = plt.figure()
     ax = plt.axes(projection='3d')
   if minv is None or maxv is None:
-    minv = np.min(data['com'+suffix][i][:,:3],axis=0)
-    maxv = np.max(data['com'+suffix][i][:,:3],axis=0)
+    minv = np.min(data['com'+suffix][i][mint:maxt,:3],axis=0)
+    maxv = np.max(data['com'+suffix][i][mint:maxt,:3],axis=0)
     muv = (maxv+minv)/2
     maxdv = np.max(maxv-minv)
     maxdv += 2*1.1*bodyl
@@ -1651,11 +1681,14 @@ def plot_body_trajectory(data,i,suffix='',tskip=50,bodyl=.1,fig=None,ax=None,col
   #   ax.plot(limv[0,[0,0,1,1,0]],limv[1,[0,1,1,0,0]],[minv[2],]*5,'-',color=projcolor)
 
   if colortime:
-    cmap = matplotlib.colormaps['jet']
+    cmap = matplotlib.colormaps['jet'](np.linspace(0,1,T))
+    # modify cmap to be darker
+    cmap[:,:3] *= .7
+    cmap = matplotlib.colors.ListedColormap(cmap)
     cmapproj = matplotlib.colormaps['gray']
 
-  com = data['com'+suffix][i][:,:3]
-  q = data['qpos'+suffix][i][:,3:]
+  com = data['com'+suffix][i][mint:maxt,:3]
+  q = data['qpos'+suffix][i][mint:maxt,3:]
   tail = quatrotate(q,np.array([-bodyl,0,0]))
   tail = tail + com
   d = np.linalg.norm(tail-com,axis=1)
@@ -1665,6 +1698,8 @@ def plot_body_trajectory(data,i,suffix='',tskip=50,bodyl=.1,fig=None,ax=None,col
     lc = art3d.Line3DCollection(np.concatenate((com[:-1,None,:],com[1:,None,:]),axis=1),cmap=cmap)
     lc.set_array(np.linspace(0,1,T-1))
     ax.add_collection(lc)
+    if plotcb:
+      axcb = fig.colorbar(lc)
   else:
     ax.plot(com[:,0],com[:,1],com[:,2],'-',color=maincolor)
     
@@ -1700,6 +1735,149 @@ def plot_body_trajectory(data,i,suffix='',tskip=50,bodyl=.1,fig=None,ax=None,col
   ax.set_zlabel('z (cm)')
   
   return fig,ax,minv,maxv
+
+# copied from roman's code
+def quat_dist_short_arc(quat1: np.ndarray,
+                        quat2: np.ndarray) -> np.ndarray:
+    """Returns the shortest geodesic distance between two unit quaternions.
+
+    angle = arccos(2(p.q)^2 - 1)
+
+    The distance is the angle subtended by `quat1` and `quat2` along
+    a great arc of the 4D sphere. The arc IS the shortest one out of the two
+    possible arcs, and the returned angle is in range: 0 <= angle < pi.
+
+    Any number of leading batch dimensions is supported.
+
+    Args:
+        quat1, quat2: Arrays of shape (B, 4), any number of batch
+            dimensions is supported.
+
+    Returns:
+        An array of quaternion distances, shape (B,).
+    """
+    quat1 = quat1 / np.linalg.norm(quat1, axis=-1, keepdims=True)
+    quat2 = quat2 / np.linalg.norm(quat2, axis=-1, keepdims=True)
+    x = 2*np.sum(quat1 * quat2, axis=-1)**2 - 1
+    x = np.minimum(1., x)
+    return np.arccos(x)
+
+def compute_body_error(data):
+  ntraj = len(data['com'])
+  com_err = []
+  q_err = []
+  for i in range(ntraj):
+    com_ref = data['com_ref'][i][:,:3]
+    com = data['com'][i][:,:3]
+    T = min(com_ref.shape[0],com.shape[0])
+    com_err.append(np.linalg.norm(com_ref[:T]-com[:T],axis=1))
+    q = data['qpos'][i][:T,3:]
+    q_ref = data['qpos_ref'][i][:T,3:]
+    q_err.append(quat_dist_short_arc(q,q_ref))
+  data['com_err'] = com_err
+  data['q_err'] = q_err
+  return
+
+def plot_body_error(data,dt,prctiles_compute=[50,75,90,95],minfracn=.5,plotall=False):
+  ntraj = len(data['com_err'])
+  allTs = np.array([x.shape[0] for x in data['com_err']])
+  maxT = np.max(allTs)
+  T = int(np.round(np.percentile(allTs,minfracn*100)))
+  
+  if plotall:
+    prctiles_compute = [50,]
+      
+  def compute_error_stats(errcurr):
+  
+    err = np.zeros((ntraj,maxT))
+    err[:] = np.nan
+    for traji in range(ntraj):
+      err[traji,:errcurr[traji].shape[0]] = errcurr[traji]
+    err = err[:,:T]
+    prctileerrcurr = np.nanpercentile(err,prctiles_compute,axis=0)
+
+    return prctileerrcurr
+
+  prctileerr = {'Centroid': compute_error_stats(data['com_err']),
+                'Orientation': compute_error_stats(data['q_err'])*180/np.pi}
+  units = {'Centroid': 'cm', 'Orientation': 'deg'}
+
+  fig,ax = plt.subplots(2,1,sharex=True,subplot_kw={'yscale': 'log'})
+
+  cm = matplotlib.colormaps.get_cmap('jet')
+  if plotall:
+    #turnangle_xy = np.abs(data['turnangle_xy_ref'])
+    #turnangle_xy[np.isnan(turnangle_xy)] = 0
+    #trajcolors = cm(turnangle_xy/np.pi)[:,:3]
+    trajcolors = cm(np.linspace(0,1,ntraj))[:,:3]
+    for i in range(ntraj):
+      Tcurr = min(T,data['com_err'][i].shape[0])
+      ax[0].plot(np.arange(Tcurr)*dt*1000,data['com_err'][i][:Tcurr],color=trajcolors[i],alpha=.5,lw=.25)
+      ax[1].plot(np.arange(Tcurr)*dt*1000,data['q_err'][i][:Tcurr]*180/np.pi,color=trajcolors[i],alpha=.5,lw=.25)
+    prctile_colors = np.zeros((len(prctiles_compute),3))
+  else:
+    prctile_colors = cm(np.linspace(0,1,len(prctiles_compute)))[:,:3]
+
+  for i,(k,v) in enumerate(prctileerr.items()):
+    for j in range(len(prctiles_compute)):
+      ax[i].plot(np.arange(T)*dt*1000,v[j],label=f'{prctiles_compute[j]}%ile',color=prctile_colors[j])
+    ax[i].set_ylabel(f'{k} error ({units[k]})')
+  ax[-1].set_xlabel('Time (ms)')
+  if not plotall:
+    ax[0].legend()
+
+  fig.tight_layout()
+
+  return fig,ax
+
+def plot_observations(data,i,dt,mint=0,maxt=np.inf,toplot=None,nplot=1):
+
+  unitconv = {'walker/joints_pos': 180/np.pi}
+  symtypes = ['walker/joints_pos',]
+
+  if toplot is None:
+    toplot = {}
+    if type(nplot) is int:
+      nplot = {k: nplot for k in data['observation'][i][0].keys()}
+    for k,n in nplot.items():
+      l = len(data['observation'][i][0][k].flatten())
+      if l > 0:
+        toplot[k] = np.unique(np.linspace(0,l-1,n,dtype=int))
+
+  maxt = min(maxt,len(data['observation'][i]))
+
+  nplottotal = sum([len(x) for x in toplot.values()])
+  fig,ax = plt.subplots(nplottotal,1,figsize=(6,5),sharex=True)
+  axi = 0
+  ts = np.arange(mint,maxt)*dt*1000
+  for k,idxplot in toplot.items():
+    for j in idxplot:
+      datacurr = np.array([data['observation'][i][t][k].flatten()[j] for t in range(mint,maxt)])
+      # transform wing angles so that they match output coordinate system
+      if k == 'walker/joints_pos':
+        if j in [4,7]:
+          # wing deviation
+          datacurr = -datacurr
+        elif j in [5,8]:
+          # rotation
+          datacurr = np.pi/2-np.pi*BODY_PITCH_ANGLE/180-datacurr
+      if k in unitconv:
+        datacurr *= unitconv[k]
+      ax[axi].plot(ts,datacurr)
+      if k in symtypes:
+        ylim = np.max(np.abs(ax[axi].get_ylim()))
+        ax[axi].set_ylim([-ylim,ylim])
+        ax[axi].plot(ts[[0,-1]],[0,0],'-',color=[.7,.7,.7])
+      k1 = re.sub('^walker/','',k)
+      ax[axi].set_ylabel(f'{k1}[{j}]')
+      ax[axi].spines["top"].set_visible(False)
+      ax[axi].spines["right"].set_visible(False)
+      axi += 1
+  ax[-1].set_xlabel('Time (ms)')
+  fig.tight_layout()
+  
+  return fig,ax
+  
 
 savefigformats = ['png','svg']
 def mysavefig(fig,name):
@@ -1802,6 +1980,8 @@ if __name__ == "__main__":
   classify_stroke_type(allmodeldata,thresh_linear_acc_stroke,thresh_angular_acc_stroke)
   classify_stroke_type(allmodeldata,thresh_linear_acc_stroke,thresh_angular_acc_stroke,suffix='_ref')
   
+  compute_body_error(allmodeldata)
+  
   modeldata = copy.deepcopy(allmodeldata)
   filter_trajectories(modeldata,testtrajidx)  
   
@@ -1814,6 +1994,8 @@ if __name__ == "__main__":
     mysavefig(fig,'omega_response_all')
   fig,ax = plot_compare_omega_response(modeldata,dt,deltaturn=deltaturn,plotall=False,nbins=1)
   if savefigs:
+    fig.set_size_inches(3,6)
+    fig.tight_layout()
     mysavefig(fig,'omega_response_notbinned')
 
   ntraj = len(modeldata['qpos'])
@@ -1828,14 +2010,11 @@ if __name__ == "__main__":
   # plot omega for nplot trajectories
   #fig,ax = plot_body_rpy_traj(modeldata,dt,idxplot=idxplot)
   fig,ax = plot_body_omega_traj(modeldata,dt,idxplot=idxplot)
-    
-  # plot wing angles
-  # if savefigs:
-  #   plot_wing_angle_trajs(modeldata,idxplot,dosave=True)  
-  plot_wing_angle_trajs(modeldata,idxplot[[0,]])
   
-  fig,ax = plot_attackangle_by_stroketype(modeldata,plotall=True)
+  fig,ax = plot_attackangle_by_stroketype(modeldata,plotall=False)
   if savefigs:
+    fig.set_size_inches(5.15,2.7)
+    fig.tight_layout()
     mysavefig(fig,'attackangle')
     
   acc_stroke_histdata,fig,ax = plot_compare_acc_per_stroke(allmodeldata)
@@ -1845,19 +2024,79 @@ if __name__ == "__main__":
   for side in ['left','right']:
     fig,ax = plot_compare_stroke_variability(allmodeldata,dt,side=side)
     if savefigs:
+      fig.set_size_inches(5,3.74)
+      fig.tight_layout()
       mysavefig(fig,f'stroke_variability_{side}')
-      
+
+
+  # plot body trajectories
   tskip = 10
-  idxplot = np.r_[order[:2],order[-2:]]
+  nplot_per_batch = 9
+  if savefigs:        
+    idxplot = n.arange(len(modeldata['turnangle_ref']))
+  else:
+    idxplot = np.r_[order[:2],order[-2:]]
   nplot = len(idxplot)
-  nc = int(np.ceil(np.sqrt(nplot)))
-  nr = int(np.ceil(nplot/nc))
-  fig,ax = plt.subplots(nr,nc,figsize=(8*nc,8*nr),subplot_kw={'projection': '3d'})
-  ax = ax.flatten()
-  for i in range(nplot):
-    traji = idxplot[i]
-    _,_,minv_ref,maxv_ref = plot_body_trajectory(modeldata,traji,suffix='_ref',colortime=False,plotproj=True,tskip=tskip,projcolor=.7*np.ones(3),fig=fig,ax=ax[i])
-    _,_,minv,maxv = plot_body_trajectory(modeldata,traji,suffix='',colortime=True,plotproj=True,tskip=tskip,fig=fig,ax=ax[i])
+  nplotcurr = min(nplot_per_batch,nplot)
+
+  nc = int(np.ceil(np.sqrt(nplotcurr)))
+  nr = int(np.ceil(nplotcurr/nc))
+  for starti in range(0,nplot,nplot_per_batch):
+    endi = min(starti+nplot_per_batch,nplot)
+    idxplotcurr = idxplot[starti:endi]
+    nplotcurr = endi-starti
+    fig,ax = plt.subplots(nr,nc,figsize=(8*nc,8*nr),subplot_kw={'projection': '3d'})
+    ax = ax.flatten()
+    for traji in range(starti,endi):
+      axi = traji-starti
+      _,_,minv_ref,maxv_ref = plot_body_trajectory(modeldata,traji,suffix='_ref',colortime=False,plotproj=True,tskip=tskip,projcolor=.7*np.ones(3),fig=fig,ax=ax[axi])
+      _,_,minv,maxv = plot_body_trajectory(modeldata,traji,suffix='',colortime=True,plotproj=True,tskip=tskip,fig=fig,ax=ax[axi])
+    fig.tight_layout()
+    if savefigs:
+      mysavefig(fig,f'sample_body_trajectories_{starti}-{endi}')
+      if endi < nplot:
+        plt.close(fig)
+  
+  # plot sample observations
+  traji = idxplot[-2]
+  mint = modeldata['response_time'][traji]-50
+  maxt=modeldata['response_time'][traji]+50
+  toplot = {'walker/joints_pos': [3,4,5],'walker/world_zaxis': [2,],'walker/ref_displacement': [2,]}
+  fig,ax = plot_observations(modeldata,traji,dt,toplot=toplot,mint=mint,maxt=maxt)
+  fig.set_size_inches(3.61,5)
   fig.tight_layout()
+  if savefigs:
+    mysavefig(fig,f'sample_observations_{idxplot[-2]}')
+    
+  # plot wing angles
+  # if savefigs:
+  #   plot_wing_angle_trajs(modeldata,idxplot,dosave=True)  
+  figs,axs = plot_wing_angle_trajs(modeldata,[traji,],mint=mint,maxt=maxt)
+  for k in ['model','real']:
+    figs[k][0].set_size_inches(3.61,3.5)
+    figs[k][0].tight_layout()
+    if savefigs:
+      mysavefig(figs[k][0],f'sample_wing_angles_{k}_{idxplot[-2]}')
+    
+  # plot body trajectory
+  tskip = 25
+  fig,ax,minv_ref,maxv_ref = plot_body_trajectory(modeldata,traji,suffix='_ref',colortime=False,plotproj=True,tskip=tskip,projcolor=.7*np.ones(3))
+  _,_,minv,maxv = plot_body_trajectory(modeldata,traji,suffix='',colortime=True,plotproj=True,tskip=tskip,fig=fig,ax=ax,plotcb=True)
+  fig.tight_layout()
+  if savefigs:
+    mysavefig(fig,f'sample_body_trajectory_{idxplot[-2]}')
+    
+    
+  # plot body error
+  fig,ax = plot_body_error(modeldata,dt,plotall=False)
+  if savefigs:
+    fig.set_size_inches([4.2,3.8])
+    fig.tight_layout()
+    mysavefig(fig,'body_error_prctiles')
+  fig,ax = plot_body_error(modeldata,dt,plotall=True)
+  if savefigs:
+    fig.set_size_inches([4.2,3.8])
+    fig.tight_layout()
+    mysavefig(fig,'body_error_alltraj')
     
   print('Goodbye!')
