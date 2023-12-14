@@ -2033,7 +2033,7 @@ if __name__ == "__main__":
   tskip = 10
   nplot_per_batch = 9
   if savefigs:        
-    idxplot = n.arange(len(modeldata['turnangle_ref']))
+    idxplot = np.arange(len(modeldata['turnangle_ref']))
   else:
     idxplot = np.r_[order[:2],order[-2:]]
   nplot = len(idxplot)
